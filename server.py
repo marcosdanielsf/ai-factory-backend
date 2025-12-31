@@ -264,8 +264,8 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
-    host = yaml_config.get('server', {}).get('host', '0.0.0.0')
-    port = yaml_config.get('server', {}).get('port', 8000)
-    reload = yaml_config.get('server', {}).get('reload', True)
-    logger.info(f"Starting server at {host}:{port}")
+    host = os.environ.get('HOST', yaml_config.get('server', {}).get('host', '0.0.0.0'))
+    port = int(os.environ.get('PORT', yaml_config.get('server', {}).get('port', 8000)))
+    reload = yaml_config.get('server', {}).get('reload', False)  # Disable reload in production
+    logger.info(f"Starting server at {host}:{port} (ENV PORT: {os.environ.get('PORT', 'not set')})")
     uvicorn.run("server:app", host=host, port=port, reload=reload, log_level="info")
