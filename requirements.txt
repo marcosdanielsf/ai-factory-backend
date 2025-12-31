@@ -1,5 +1,7 @@
 # AI Factory Testing Framework - Python Dependencies
 # ===================================================
+# Updated: 2025-12-31 12:25 BRT - Railway Deploy v2.1
+# CRITICAL: supabase==2.9.1 required for proxy support
 
 # Core
 python-dotenv==1.0.0
