@@ -6,6 +6,10 @@ import { Button } from '@/components/ui/button';
 import { fetchAgentById, fetchTestResultsByAgent } from '@/lib/supabaseData';
 import { ArrowLeft, FileText, CheckCircle2, AlertCircle } from 'lucide-react';
 
+// Enable dynamic params to accept any agent ID
+export const dynamicParams = true;
+export const revalidate = 0;
+
 export default async function AgentDetailPage({ params }: { params: { id: string } }) {
   let agent, testResults;
 

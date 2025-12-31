@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -176,8 +177,9 @@ export default function AgentsPage() {
       {/* Agents Grid */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {filteredAgents.map((agent) => (
-          <Card key={agent.agent_version_id} className="hover:shadow-md transition-shadow">
-            <CardHeader>
+          <Link key={agent.agent_version_id} href={`/agents/${agent.agent_version_id}`}>
+            <Card className="hover:shadow-lg transition-all cursor-pointer h-full">
+              <CardHeader>
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <CardTitle className="text-lg">{agent.agent_name}</CardTitle>
@@ -264,7 +266,11 @@ export default function AgentsPage() {
                 <Button
                   size="sm"
                   className="flex-1"
-                  onClick={() => handleTestAgent(agent.agent_version_id)}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    handleTestAgent(agent.agent_version_id)
+                  }}
                   disabled={testingAgent === agent.agent_version_id}
                 >
                   {testingAgent === agent.agent_version_id ? (
@@ -281,7 +287,8 @@ export default function AgentsPage() {
                 </Button>
               </div>
             </CardContent>
-          </Card>
+            </Card>
+          </Link>
         ))}
       </div>
 
