@@ -136,13 +136,27 @@ async def run_agent_test_background(agent_id: str):
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     supabase_ok = False
+    error_msg = None
     try:
         if supabase:
             test_query = supabase.client.table('agent_versions').select('id').limit(1).execute()
             supabase_ok = True
     except Exception as e:
-        logger.error(f"Supabase health check failed: {e}")
+        error_msg = str(e)
+        logger.error(f"Supabase health check failed: {e}", exc_info=True)
     return HealthResponse(status="healthy" if supabase_ok else "degraded", timestamp=datetime.utcnow().isoformat(), version="1.0.0", supabase_connected=supabase_ok)
+
+@app.get("/debug/env", tags=["Health"])
+async def debug_env():
+    """Debug endpoint to check environment variables (temporary)"""
+    return {
+        "SUPABASE_URL": os.getenv('SUPABASE_URL')[:30] + "..." if os.getenv('SUPABASE_URL') else None,
+        "SUPABASE_SERVICE_ROLE_KEY": "SET" if os.getenv('SUPABASE_SERVICE_ROLE_KEY') else "NOT SET",
+        "SUPABASE_KEY": "SET" if os.getenv('SUPABASE_KEY') else "NOT SET",
+        "PORT": os.getenv('PORT'),
+        "supabase_client_initialized": supabase is not None,
+        "error_during_init": str(supabase) if supabase is None else None
+    }
 
 @app.post("/api/test-agent", response_model=TestAgentResponse, tags=["Testing"])
 async def test_agent(request: TestAgentRequest, background_tasks: BackgroundTasks, x_api_key: str = Header(..., alias="X-API-Key")):
