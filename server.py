@@ -3,6 +3,8 @@
 AI Factory Testing Framework - FastAPI Server
 ==============================================
 REST API para gerenciar testes de agentes IA.
+
+Railway Deploy: v2.0 - Fixed Supabase + httpx dependencies
 """
 
 import os

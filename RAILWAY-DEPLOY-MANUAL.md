@@ -48,7 +48,10 @@ API_KEY=sk-test-key-ai-factory-2025
 CORS_ORIGINS=http://localhost:3000,http://localhost:3001
 ```
 
-**⚠️ IMPORTANTE:** O Railway **injeta automaticamente** a variável `PORT`, então **NÃO adicione** `PORT` manualmente!
+**⚠️ IMPORTANTES:**
+- O Railway **injeta automaticamente** a variável `PORT`, então **NÃO adicione** `PORT` manualmente!
+- A variável **DEVE** ser `SUPABASE_SERVICE_ROLE_KEY` (não `SUPABASE_KEY`)
+- O código suporta ambas, mas `SUPABASE_SERVICE_ROLE_KEY` tem prioridade
 
 ---
 
