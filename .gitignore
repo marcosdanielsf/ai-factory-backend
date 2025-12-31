@@ -1,0 +1,146 @@
+# AI Factory Testing Framework - .gitignore
+
+# =============================================================================
+# SECRETS - NUNCA COMMITAR
+# =============================================================================
+.env
+.env.local
+.env.production
+.env.railway
+*.key
+*.pem
+secrets/
+
+# =============================================================================
+# PYTHON
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.hypothesis/
+.pytest_cache/
+pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# Poetry
+poetry.lock
+
+# Environments
+venv/
+ENV/
+env/
+.venv
+
+# =============================================================================
+# DOCKER
+# =============================================================================
+*.log
+docker-compose.override.yml
+
+# =============================================================================
+# IDE / EDITORS
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# =============================================================================
+# PROJECT SPECIFIC
+# =============================================================================
+# Logs
+logs/
+*.log
+
+# Reports
+reports/
+*.html
+*.pdf
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Backups
+*.backup
+*.bak
+
+# =============================================================================
+# RAILWAY SPECIFIC
+# =============================================================================
+.railway/
+railway-debug.log
+railway-status.txt
+railway-vars.txt
+
+# =============================================================================
+# NODE (se usar frontend)
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =============================================================================
+# SUPABASE
+# =============================================================================
+.supabase/
+
+# =============================================================================
+# MISC
+# =============================================================================
+.env.test
+.env.development
+.env.staging

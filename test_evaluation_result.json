@@ -1,0 +1,64 @@
+{
+  "overall_score": 8.5,
+  "scores": {
+    "completeness": 8.0,
+    "tone": 9.5,
+    "engagement": 9.0,
+    "compliance": 9.5,
+    "conversion": 7.0
+  },
+  "test_case_evaluations": [
+    {
+      "test_name": "Lead interessado em solução",
+      "score": 9.0,
+      "passed": true,
+      "feedback": "Excelente abordagem inicial consultiva, focando em entender o desafio antes de vender"
+    },
+    {
+      "test_name": "Descoberta de Budget",
+      "score": 9.5,
+      "passed": true,
+      "feedback": "Pergunta sobre budget de forma natural e consultiva, justificando a necessidade da informação"
+    },
+    {
+      "test_name": "Identificação de Authority",
+      "score": 8.5,
+      "passed": true,
+      "feedback": "Identificou corretamente o decisor, mas poderia explorar mais sobre o processo decisório"
+    },
+    {
+      "test_name": "Lead sem budget",
+      "score": 8.0,
+      "passed": true,
+      "feedback": "Boa estratégia de nurturing, mantendo o lead aquecido sem ser agressivo"
+    },
+    {
+      "test_name": "Agendamento de reunião",
+      "score": 7.5,
+      "passed": true,
+      "feedback": "Conseguiu agendar, mas não explorou completamente Need e Timeline antes de propor a reunião"
+    }
+  ],
+  "strengths": [
+    "Tom consultivo e empático consistente em todas as interações",
+    "Excelente compliance com as instruções do sistema",
+    "Boa capacidade de engajamento e manutenção da conversa fluida",
+    "Abordagem não agressiva e respeitosa com leads sem budget"
+  ],
+  "weaknesses": [
+    "Não explorou completamente todas as dimensões BANT em cada interação",
+    "Faltou aprofundar em Need específico antes de agendar reunião",
+    "Timeline não foi adequadamente explorado nos casos apresentados"
+  ],
+  "failures": [],
+  "warnings": [
+    "Risco de agendar reuniões sem qualificação BANT completa",
+    "Pode estar perdendo oportunidade de coletar informações valiosas ao avançar muito rápido"
+  ],
+  "recommendations": [
+    "Implementar checklist mental BANT antes de propor agendamento",
+    "Desenvolver mais perguntas sobre Timeline e urgência do projeto",
+    "Aprofundar discovery de Need com perguntas sobre impacto do problema",
+    "Criar fluxo de perguntas encadeadas para garantir cobertura completa do BANT"
+  ]
+}

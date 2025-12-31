@@ -1,0 +1,391 @@
+================================================================================
+                  AI FACTORY V4 - TEST RUNNER ARCHITECTURE
+================================================================================
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│                            USER / CLIENT                                   │
+│  (Calls run_tests() with agent_version_id or test cases)                  │
+└────────────────────────────────┬─────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                          TestRunner.run_tests()                            │
+│                     (Main Async Orchestrator)                              │
+│                                                                            │
+│  1. Load Agent from Supabase (or use mock)                                │
+│     └─ get_agent_version(agent_version_id)                               │
+│        Returns: {id, name, version, system_prompt, ...}                  │
+│                                                                            │
+│  2. Load Skill (optional)                                                 │
+│     └─ get_skill(agent_version_id)                                       │
+│        Returns: {instructions, examples, rubric, test_cases}             │
+│                                                                            │
+│  3. Load Test Cases (Priority order)                                      │
+│     ├─ Use provided test_cases parameter (if given)                      │
+│     ├─ Or load from skill.test_cases (if available)                      │
+│     └─ Or use DEFAULT_SDR_TEST_CASES (10 standard cases)                │
+│                                                                            │
+│  4. Execute Tests (For each test case)                                    │
+│     └─ _run_single_test(agent, skill, test_case)                        │
+│        ├─ Build agent prompt from system_prompt + skill instructions     │
+│        ├─ Get user input from test_case['input']                         │
+│        ├─ Call _simulate_agent_response()                                │
+│        └─ Return test result {input, output, expected, score, ...}       │
+│                                                                            │
+└────────────────────────────┬───────────────────────────────────────────────┘
+                             │
+                             │ [List of test results]
+                             ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                 AGENT SIMULATOR (_simulate_agent_response)                 │
+│                                                                            │
+│  Input:  system_prompt (agent behavior), user_message (test input)       │
+│                                                                            │
+│  Process:                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │  Call Claude Sonnet API                                          │    │
+│  │  ├─ Model: claude-sonnet-4-20250514                             │    │
+│  │  ├─ System: agent's system_prompt                               │    │
+│  │  ├─ Message: user_message from test case                        │    │
+│  │  ├─ Max tokens: 1024                                            │    │
+│  │  └─ Temperature: default (0.7)                                  │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                            │
+│  Output: Agent's response text                                            │
+│  Error handling: Returns error message if API fails                       │
+│                                                                            │
+└────────────────────────────┬───────────────────────────────────────────────┘
+                             │
+                             │ [Simulated responses added to results]
+                             ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                    EVALUATOR (evaluate() - LLM-as-Judge)                  │
+│                          Claude Opus Evaluation                            │
+│                                                                            │
+│  Input: agent {data}, skill {data}, test_results [{all results}]         │
+│                                                                            │
+│  Process:                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │  1. Extract agent info and purpose                              │    │
+│  │  2. Summarize system prompt                                     │    │
+│  │  3. Load rubric (from skill or default 5-dim rubric)           │    │
+│  │  4. Format test results as JSON                                 │    │
+│  │  5. Create evaluation prompt with all context                   │    │
+│  │  6. Call Claude Opus API                                        │    │
+│  │     ├─ Model: claude-opus-4-20250514                           │    │
+│  │     ├─ Max tokens: 4000                                         │    │
+│  │     ├─ Temperature: 0.3 (deterministic)                         │    │
+│  │     └─ Message: Complete evaluation prompt                      │    │
+│  │  7. Parse JSON response                                         │    │
+│  │  8. Validate and fill missing fields                            │    │
+│  │  9. Recalculate weighted score if needed                        │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                            │
+│  RUBRIC (5 Dimensions):                                                    │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │ 1. Completeness (25%)  - BANT qualification                    │    │
+│  │ 2. Tone (20%)          - Consultative approach                 │    │
+│  │ 3. Engagement (20%)    - Lead interaction quality              │    │
+│  │ 4. Compliance (20%)    - Following instructions                │    │
+│  │ 5. Conversion (15%)    - Achieving goals                       │    │
+│  │                                                                 │    │
+│  │ Formula: overall = (C*0.25 + T*0.20 + E*0.20 + Co*0.20 + C*0.15) │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                            │
+│  Output:                                                                   │
+│  {                                                                         │
+│    'overall_score': 8.5,                                                  │
+│    'scores': {                                                            │
+│      'completeness': 9.0,                                                 │
+│      'tone': 8.5,                                                         │
+│      'engagement': 8.0,                                                   │
+│      'compliance': 9.0,                                                   │
+│      'conversion': 7.5                                                    │
+│    },                                                                      │
+│    'strengths': [...],                                                    │
+│    'weaknesses': [...],                                                   │
+│    'failures': [...],                                                     │
+│    'warnings': [...],                                                     │
+│    'recommendations': [...]                                               │
+│  }                                                                         │
+│                                                                            │
+└────────────────────────────┬───────────────────────────────────────────────┘
+                             │
+                             │ [Evaluation with scores]
+                             ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│               REPORT GENERATOR (generate_html_report)                      │
+│                                                                            │
+│  Input: agent {data}, evaluation {scores}, test_results [{all}]          │
+│                                                                            │
+│  Process:                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │  1. Prepare context for Jinja2 template                         │    │
+│  │     ├─ Agent name, version, ID                                 │    │
+│  │     ├─ Overall score and score breakdown                       │    │
+│  │     ├─ Test results with evaluations                           │    │
+│  │     ├─ Strengths, weaknesses, recommendations                 │    │
+│  │     └─ Metadata (timestamp, evaluator model, etc)             │    │
+│  │                                                                 │    │
+│  │  2. Render Jinja2 template (report.html)                      │    │
+│  │     └─ Uses Tailwind CSS for styling                          │    │
+│  │                                                                 │    │
+│  │  3. Generate filename with timestamp                           │    │
+│  │     └─ Format: report_{agent_id}_{timestamp}.html             │    │
+│  │                                                                 │    │
+│  │  4. Save to output directory                                   │    │
+│  │     └─ Default: ./reports/ or REPORTS_OUTPUT_DIR env var     │    │
+│  │                                                                 │    │
+│  │  5. Return report path/URL                                     │    │
+│  │     └─ If public_url_base set, return full URL                │    │
+│  │     └─ Otherwise return local file path                        │    │
+│  │                                                                 │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                            │
+│  HTML Report Contains:                                                     │
+│  ├─ Header with agent name, version, overall score                       │
+│  ├─ Score breakdown with progress bars                                    │
+│  ├─ Test results summary (total, passed, failed)                         │
+│  ├─ Detailed test case results                                            │
+│  ├─ Strengths and weaknesses                                              │
+│  ├─ Recommendations and warnings                                          │
+│  └─ Footer with metadata                                                  │
+│                                                                            │
+│  Styling:                                                                  │
+│  ├─ Green (≥8.0): Good score                                              │
+│  ├─ Yellow (6.0-7.9): Needs improvement                                  │
+│  └─ Red (<6.0): Failed                                                    │
+│                                                                            │
+└────────────────────────────┬───────────────────────────────────────────────┘
+                             │
+                             │ [HTML report file path]
+                             ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                      SAVE RESULTS TO SUPABASE                              │
+│                         (Optional, if connected)                           │
+│                                                                            │
+│  save_test_result()                                                        │
+│  ├─ Insert into agenttest_test_results table                             │
+│  └─ Returns test_result_id                                                │
+│                                                                            │
+│  update_agent_test_results()                                              │
+│  ├─ Update agent_versions table                                           │
+│  ├─ Set last_test_score                                                   │
+│  ├─ Set test_report_url                                                   │
+│  ├─ Set framework_approved (true if score >= 8.0)                        │
+│  └─ Set status (active if approved, needs_improvement otherwise)         │
+│                                                                            │
+└────────────────────────────┬───────────────────────────────────────────────┘
+                             │
+                             ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                        RETURN FINAL RESULT                                 │
+│                                                                            │
+│  {                                                                         │
+│    'overall_score': 8.5,          # Final score (0-10)                   │
+│    'test_details': {              # All evaluation details                 │
+│      'scores': {...},                                                     │
+│      'test_cases': [...],                                                 │
+│      'failures': [...],                                                   │
+│      'warnings': [...],                                                   │
+│      'strengths': [...],                                                  │
+│      'weaknesses': [...],                                                 │
+│      'recommendations': [...]                                             │
+│    },                                                                      │
+│    'report_url': '.../report_xxx_20251231_064430.html',  # Report path   │
+│    'duration_ms': 45000           # Total execution time                  │
+│  }                                                                         │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+                              KEY DATA FLOWS
+================================================================================
+
+TEST CASE STRUCTURE:
+{
+  'name': 'Test name',
+  'input': 'User message',
+  'expected_behavior': 'What agent should do',
+  'rubric_focus': ['tone', 'engagement'],
+  'category': 'cold_lead'  # or other category
+}
+
+TEST RESULT STRUCTURE:
+{
+  'name': 'Test name',
+  'input': 'User message',
+  'expected_behavior': 'Expected behavior',
+  'agent_response': 'What Claude responded',
+  'rubric_focus': ['tone', 'engagement'],
+  'category': 'cold_lead',
+  'score': 8.5,
+  'passed': True,
+  'feedback': 'Specific feedback from evaluator'
+}
+
+EVALUATION STRUCTURE:
+{
+  'overall_score': 8.5,
+  'scores': {
+    'completeness': 9.0,
+    'tone': 8.5,
+    'engagement': 8.0,
+    'compliance': 9.0,
+    'conversion': 7.5
+  },
+  'test_case_evaluations': [...],
+  'strengths': ['Strength 1', ...],
+  'weaknesses': ['Weakness 1', ...],
+  'failures': [],
+  'warnings': [],
+  'recommendations': ['Recommendation 1', ...]
+}
+
+
+================================================================================
+                            ASYNC/AWAIT FLOW
+================================================================================
+
+async def run_tests(agent_version_id):
+    │
+    ├─ Load agent (sync)
+    ├─ Load skill (sync)
+    ├─ Load test cases (sync)
+    │
+    ├─ For each test case:
+    │  └─ await _run_single_test()
+    │     └─ await _simulate_agent_response()
+    │        └─ Call Claude API (async)
+    │
+    ├─ await evaluator.evaluate()
+    │  └─ Call Claude Opus API (async)
+    │
+    ├─ await reporter.generate_html_report()
+    │  └─ Render template (sync)
+    │
+    └─ Save to Supabase (sync or optional)
+
+
+================================================================================
+                          ERROR HANDLING
+================================================================================
+
+API Errors:
+├─ Evaluator fallback evaluation (default scores)
+├─ Agent simulation error -> return [ERROR] message
+├─ Report template missing -> use fallback HTML
+└─ Supabase connection -> log warning, continue
+
+Data Validation:
+├─ Missing agent prompt -> use empty string
+├─ Missing test case fields -> skip with warning
+├─ Invalid JSON in response -> parse with regex fallback
+└─ Missing rubric -> use DEFAULT_RUBRIC
+
+
+================================================================================
+                            INTEGRATION POINTS
+================================================================================
+
+Supabase Integration:
+├─ agent_versions table (load agent)
+├─ agenttest_skills table (load skill)
+├─ agenttest_test_results table (save results)
+└─ agent_conversations table (load examples)
+
+Anthropic Integration:
+├─ Claude Sonnet (agent simulation)
+└─ Claude Opus (evaluation)
+
+Template Integration:
+└─ Jinja2 (HTML report rendering)
+
+
+================================================================================
+                          SEQUENCE DIAGRAM
+================================================================================
+
+User           TestRunner       Claude          Evaluator       Reporter
+ │                 │           Sonnet         (Opus)         Generator
+ │                 │              │               │              │
+ ├─run_tests()────>│              │               │              │
+ │                 │              │               │              │
+ │             Load agent, skill, test cases      │              │
+ │                 │              │               │              │
+ │            For each test:      │               │              │
+ │                 │              │               │              │
+ │                 ├──simulate──>│               │              │
+ │                 │              │               │              │
+ │                 │<─response──│               │              │
+ │                 │              │               │              │
+ │         (collect all results)  │               │              │
+ │                 │              │               │              │
+ │                 ├─evaluate──────────────────>│              │
+ │                 │              │               │              │
+ │                 │              │        (5-dim rubric)       │
+ │                 │              │               │              │
+ │                 │              │    <─scores─│              │
+ │                 │              │               │              │
+ │                 ├─generate report──────────────────────────>│
+ │                 │              │               │              │
+ │                 │              │               │         (HTML)
+ │                 │              │               │         (CSS)
+ │                 │              │               │    <─report─│
+ │                 │              │               │              │
+ │<─final result──│              │               │              │
+ │                 │              │               │              │
+
+
+================================================================================
+                          STATE MACHINE
+================================================================================
+
+                        ┌─────────────┐
+                        │   START     │
+                        └─────┬───────┘
+                              │
+                        ┌─────▼──────┐
+                        │ Load Agent │
+                        └─────┬──────┘
+                              │
+                        ┌─────▼──────┐
+                        │ Load Skill │
+                        │ (optional) │
+                        └─────┬──────┘
+                              │
+                        ┌─────▼───────────┐
+                        │ Load Test Cases │
+                        └─────┬───────────┘
+                              │
+                    ┌─────────▼──────────┐
+                    │ Simulate Responses │
+                    │ (for each test)    │
+                    └─────────┬──────────┘
+                              │
+                    ┌─────────▼──────────┐
+                    │   Evaluate         │
+                    │ (Claude Opus)      │
+                    └─────────┬──────────┘
+                              │
+                    ┌─────────▼──────────┐
+                    │ Generate Report    │
+                    └─────────┬──────────┘
+                              │
+                    ┌─────────▼──────────┐
+                    │ Save to Supabase   │
+                    │ (optional)         │
+                    └─────────┬──────────┘
+                              │
+                        ┌─────▼──────┐
+                        │ Return     │
+                        │ Result     │
+                        └─────┬──────┘
+                              │
+                        ┌─────▼──────┐
+                        │    END     │
+                        └────────────┘
+
+
+================================================================================

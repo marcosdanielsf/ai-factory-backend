@@ -1,0 +1,61 @@
+# AI Factory Testing Framework - Configuration
+# ============================================
+
+# Supabase
+supabase:
+  url: ${SUPABASE_URL}
+  key: ${SUPABASE_KEY}
+  service_role_key: ${SUPABASE_SERVICE_ROLE_KEY}  # Para operações admin
+
+# Anthropic API
+anthropic:
+  api_key: ${ANTHROPIC_API_KEY}
+  evaluator_model: claude-opus-4  # LLM-as-Judge
+  temperature: 0.3
+  max_tokens: 4000
+
+# Testing
+testing:
+  default_threshold: 8.0  # Score mínimo para aprovação
+  test_timeout_seconds: 300
+  max_retries: 3
+  parallel_tests: false  # Rodar testes em paralelo (futuro)
+
+# Reflection Loop (Auto-melhoria)
+reflection:
+  enabled: true
+  min_score_for_reflection: 6.0  # Só tenta melhorar se >= 6.0
+  max_iterations: 3  # Máximo de tentativas de melhoria
+  improvement_threshold: 0.5  # Melhoria mínima esperada
+
+# Skills
+skills:
+  local_path: ./skills/  # Caminho local dos skills (Obsidian)
+  sync_on_test: true  # Sincronizar antes de testar
+  auto_generate_knowledge: true  # Gerar KNOWLEDGE.md automaticamente
+
+# Reports
+reports:
+  output_dir: /mnt/user-data/outputs/test-reports/
+  format: html  # html, json, markdown
+  include_full_transcript: true
+  public_url_base: null  # URL base para reports públicos (ou null para local)
+
+# Server (FastAPI)
+server:
+  host: 0.0.0.0
+  port: 8000
+  reload: true  # Hot reload (desenvolvimento)
+  workers: 4  # Gunicorn workers (produção)
+
+# Logging
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: ./logs/framework.log
+
+# Notifications (opcional)
+notifications:
+  slack_webhook: ${SLACK_WEBHOOK_URL}
+  email_on_failure: false
+  email_recipients: []

@@ -1,0 +1,51 @@
+# Railway Configuration for AI Factory API
+# ===========================================
+# Production deployment configuration
+
+[build]
+# Build command - install dependencies
+builder = "dockerfile"
+dockerfile = "Dockerfile"
+
+[deploy]
+# Start command
+startCommand = "gunicorn main:app -c gunicorn.conf.py"
+
+# Memory and CPU limits
+memory = "512MB"
+cpu = "1"
+
+# Health check configuration
+healthcheckPath = "/health"
+healthcheckTimeout = 10
+healthcheckInterval = 30
+
+# Port exposure
+port = 8000
+
+# Restart policy
+restartPolicyType = "always"
+restartPolicyMaxRetries = 5
+
+[env]
+# Python environment
+PYTHONUNBUFFERED = "true"
+PYTHONDONTWRITEBYTECODE = "true"
+
+# API configuration
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT = "8000"
+
+# Gunicorn configuration
+GUNICORN_WORKERS = "4"
+GUNICORN_TIMEOUT = "120"
+GUNICORN_WORKER_CLASS = "uvicorn.workers.UvicornWorker"
+
+# Logging
+LOG_LEVEL = "INFO"
+
+# Performance optimization
+# Note: Set these via Railway dashboard or environment variables
+# SUPABASE_URL=your_url
+# SUPABASE_KEY=your_key
+# ANTHROPIC_API_KEY=your_key

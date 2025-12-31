@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # AI Factory API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-factory-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=true
+      - PYTHONDONTWRITEBYTECODE=true
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      - GUNICORN_WORKERS=2
+      - GUNICORN_TIMEOUT=120
+      - LOG_LEVEL=INFO
+      # Database configuration
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./src:/app/src
+      - ./main.py:/app/main.py
+    depends_on:
+      - postgres
+    networks:
+      - ai-factory
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # PostgreSQL Database (Optional - for local testing)
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai-factory-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=ai_factory
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ai-factory
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    profiles:
+      - postgres  # Only run with --profile postgres
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  ai-factory:
+    driver: bridge
