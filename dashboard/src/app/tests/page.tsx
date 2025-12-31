@@ -1,35 +1,70 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { testRuns, agents } from '@/lib/mockData';
+import { fetchAllTestResults } from '@/lib/supabaseData';
+import type { LatestTestResult } from '@/types/database';
 import { Search, Calendar, Clock } from 'lucide-react';
 
 type StatusFilter = 'all' | 'passed' | 'failed' | 'warning';
 
 export default function TestsPage() {
+  const [testResults, setTestResults] = useState<LatestTestResult[]>([]);
+  const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [scoreFilter, setScoreFilter] = useState<'all' | 'high' | 'medium' | 'low'>('all');
 
-  const filteredTests = testRuns
+  useEffect(() => {
+    async function loadTests() {
+      try {
+        const data = await fetchAllTestResults(100);
+        setTestResults(data);
+      } catch (error) {
+        console.error('Error fetching test results:', error);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadTests();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="text-center space-y-2">
+          <div className="text-lg font-medium">Loading test history...</div>
+          <div className="text-sm text-muted-foreground">Please wait</div>
+        </div>
+      </div>
+    );
+  }
+
+  const getTestStatus = (score: number): 'passed' | 'warning' | 'failed' => {
+    if (score >= 8.0) return 'passed';
+    if (score >= 6.0) return 'warning';
+    return 'failed';
+  };
+
+  const filteredTests = testResults
     .filter((test) => {
-      const matchesSearch = test.agentName.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesStatus = statusFilter === 'all' || test.status === statusFilter;
+      const status = getTestStatus(test.overall_score);
+      const matchesSearch = test.agent_name.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesStatus = statusFilter === 'all' || status === statusFilter;
       const matchesScore =
         scoreFilter === 'all' ||
-        (scoreFilter === 'high' && test.score >= 8) ||
-        (scoreFilter === 'medium' && test.score >= 7 && test.score < 8) ||
-        (scoreFilter === 'low' && test.score < 7);
+        (scoreFilter === 'high' && test.overall_score >= 8) ||
+        (scoreFilter === 'medium' && test.overall_score >= 7 && test.overall_score < 8) ||
+        (scoreFilter === 'low' && test.overall_score < 7);
 
       return matchesSearch && matchesStatus && matchesScore;
     })
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    .sort((a, b) => new Date(b.tested_at).getTime() - new Date(a.tested_at).getTime());
 
   const getStatusBadgeVariant = (status: string) => {
     switch (status) {
@@ -51,11 +86,13 @@ export default function TestsPage() {
   };
 
   // Calculate stats
-  const totalTests = testRuns.length;
-  const passedTests = testRuns.filter((t) => t.status === 'passed').length;
-  const averageDuration = Math.round(
-    testRuns.reduce((acc, test) => acc + test.duration, 0) / testRuns.length
-  );
+  const totalTests = testResults.length;
+  const passedTests = testResults.filter((t) => getTestStatus(t.overall_score) === 'passed').length;
+  const averageDuration = totalTests > 0
+    ? Math.round(
+        testResults.reduce((acc, test) => acc + test.test_duration_ms, 0) / totalTests / 1000
+      )
+    : 0;
 
   return (
     <div className="space-y-8">
@@ -85,7 +122,7 @@ export default function TestsPage() {
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Pass Rate</CardTitle>
             <Badge className="h-6">
-              {((passedTests / totalTests) * 100).toFixed(1)}%
+              {totalTests > 0 ? ((passedTests / totalTests) * 100).toFixed(1) : '0'}%
             </Badge>
           </CardHeader>
           <CardContent>
@@ -153,7 +190,7 @@ export default function TestsPage() {
 
           {/* Results count */}
           <p className="text-sm text-muted-foreground">
-            Showing {filteredTests.length} of {testRuns.length} test runs
+            Showing {filteredTests.length} of {testResults.length} test runs
           </p>
 
           {/* Table */}
@@ -177,20 +214,22 @@ export default function TestsPage() {
                   </TableRow>
                 ) : (
                   filteredTests.map((test) => {
-                    const agent = agents.find((a) => a.id === test.agentId);
+                    const status = getTestStatus(test.overall_score);
                     return (
-                      <TableRow key={test.id}>
+                      <TableRow key={test.test_result_id}>
                         <TableCell>
-                          {agent ? (
-                            <Link href={`/agents/${agent.id}`} className="font-medium hover:underline">
-                              {test.agentName}
-                            </Link>
-                          ) : (
-                            <span className="font-medium">{test.agentName}</span>
-                          )}
+                          <Link
+                            href={`/agents/${test.agent_version_id}`}
+                            className="font-medium hover:underline"
+                          >
+                            {test.agent_name}
+                          </Link>
+                          <span className="text-xs text-muted-foreground ml-2">
+                            v{test.version}
+                          </span>
                         </TableCell>
                         <TableCell className="text-muted-foreground">
-                          {new Date(test.date).toLocaleDateString('en-US', {
+                          {new Date(test.tested_at).toLocaleDateString('en-US', {
                             year: 'numeric',
                             month: 'short',
                             day: 'numeric',
@@ -199,17 +238,17 @@ export default function TestsPage() {
                           })}
                         </TableCell>
                         <TableCell>
-                          <Badge variant={getScoreBadgeVariant(test.score)}>
-                            {test.score.toFixed(1)}
+                          <Badge variant={getScoreBadgeVariant(test.overall_score)}>
+                            {test.overall_score.toFixed(1)}
                           </Badge>
                         </TableCell>
                         <TableCell>
-                          <Badge variant={getStatusBadgeVariant(test.status)}>
-                            {test.status}
+                          <Badge variant={getStatusBadgeVariant(status)}>
+                            {status}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-muted-foreground">
-                          {test.duration}s
+                          {(test.test_duration_ms / 1000).toFixed(1)}s
                         </TableCell>
                       </TableRow>
                     );
