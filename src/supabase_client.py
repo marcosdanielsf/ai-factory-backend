@@ -18,10 +18,11 @@ class SupabaseClient:
     
     def __init__(self, url: str = None, key: str = None):
         self.url = url or os.getenv('SUPABASE_URL')
-        self.key = key or os.getenv('SUPABASE_KEY')
-        
+        # Try SUPABASE_SERVICE_ROLE_KEY first (Railway), fallback to SUPABASE_KEY (legacy)
+        self.key = key or os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_KEY')
+
         if not self.url or not self.key:
-            raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+            raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) must be set")
         
         self.client: Client = create_client(self.url, self.key)
         logger.info(f"Supabase client initialized: {self.url}")
