@@ -4,7 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { fetchAgentById, fetchTestResultsByAgent } from '@/lib/supabaseData';
-import { ArrowLeft, FileText, CheckCircle2, AlertCircle } from 'lucide-react';
+import { ArrowLeft, FileText, CheckCircle2, AlertCircle, Edit } from 'lucide-react';
 
 // Enable dynamic params to accept any agent ID
 export const dynamicParams = true;
@@ -63,6 +63,14 @@ export default async function AgentDetailPage({ params }: { params: { id: string
               day: 'numeric',
             }) : 'Never'}
           </p>
+          <div className="mt-4">
+            <Link href="/prompt-studio">
+              <Button variant="outline" className="gap-2">
+                <Edit className="h-4 w-4" />
+                Edit Prompt
+              </Button>
+            </Link>
+          </div>
         </div>
         <div className="text-right">
           <div className="text-4xl font-bold">{(agent.last_test_score || 0).toFixed(1)}</div>

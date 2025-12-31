@@ -1,0 +1,46 @@
+/* FactorAI Design System Colors */
+/* Importado de front-factorai-mottivme-sales */
+
+:root {
+  /* Background Colors */
+  --bg-primary: #0a0a0b;
+  --bg-secondary: #141416;
+  --bg-tertiary: #1c1c1f;
+  --bg-hover: #27272a;
+
+  /* Text Colors */
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+
+  /* Border Colors */
+  --border-default: #27272a;
+
+  /* Accent Colors */
+  --accent-primary: #3b82f6;
+  --accent-success: #10b981;
+  --accent-error: #ef4444;
+  --accent-warning: #f59e0b;
+}
+
+/* Tailwind Custom Classes */
+.bg-bg-primary { background-color: var(--bg-primary); }
+.bg-bg-secondary { background-color: var(--bg-secondary); }
+.bg-bg-tertiary { background-color: var(--bg-tertiary); }
+.bg-bg-hover { background-color: var(--bg-hover); }
+
+.text-text-primary { color: var(--text-primary); }
+.text-text-secondary { color: var(--text-secondary); }
+.text-text-muted { color: var(--text-muted); }
+
+.border-border-default { border-color: var(--border-default); }
+
+.text-accent-primary { color: var(--accent-primary); }
+.text-accent-success { color: var(--accent-success); }
+.text-accent-error { color: var(--accent-error); }
+.text-accent-warning { color: var(--accent-warning); }
+
+.bg-accent-primary { background-color: var(--accent-primary); }
+.bg-accent-success { background-color: var(--accent-success); }
+.bg-accent-error { background-color: var(--accent-error); }
+.bg-accent-warning { background-color: var(--accent-warning); }

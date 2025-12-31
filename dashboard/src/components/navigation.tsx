@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 const navItems = [
   { href: '/', label: 'Overview' },
   { href: '/agents', label: 'Agents' },
+  { href: '/prompt-studio', label: 'Prompt Studio' },
   { href: '/tests', label: 'Tests' },
 ];
 
