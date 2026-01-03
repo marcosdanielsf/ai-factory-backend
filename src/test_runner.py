@@ -1,7 +1,38 @@
 """
 AI Factory Testing Framework - Test Runner
 ==========================================
-Executa suites de testes em agentes IA.
+
+Orquestrador principal de testes para agentes IA.
+Coordena o fluxo completo de testes: carregamento de dados,
+execução de casos de teste, avaliação e geração de relatórios.
+
+Workflow do Test Runner:
+    1. Carrega agent_version do Supabase
+    2. Carrega skill (se existir)
+    3. Carrega test cases (de arquivo, skill ou default)
+    4. Executa cada caso de teste (simula conversa com Claude)
+    5. Envia resultados para Evaluator (Claude Opus)
+    6. Agrega resultados e calcula scores
+    7. Gera relatório HTML
+    8. Salva tudo no Supabase
+
+Example:
+    >>> from src import TestRunner, Evaluator, ReportGenerator, SupabaseClient
+    >>>
+    >>> runner = TestRunner(
+    ...     supabase_client=SupabaseClient(),
+    ...     evaluator=Evaluator(),
+    ...     report_generator=ReportGenerator()
+    ... )
+    >>>
+    >>> result = await runner.run_tests("agent-uuid-here")
+    >>> print(f"Score: {result['overall_score']}")
+    >>> print(f"Report: {result['report_url']}")
+
+Environment Variables:
+    ANTHROPIC_API_KEY: Para simulação de agentes
+    SUPABASE_URL: URL do Supabase
+    SUPABASE_KEY: API Key do Supabase
 """
 
 import os
@@ -21,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 
 # Default test cases for SDR agents
+# Cobrem cenários comuns de SDR: leads frios, objeções, qualificação, etc.
 DEFAULT_SDR_TEST_CASES = [
     {
         'name': 'Lead frio - primeira mensagem',
@@ -97,17 +129,36 @@ DEFAULT_SDR_TEST_CASES = [
 
 class TestRunner:
     """
-    Executor de testes para agentes IA.
+    Executor principal de testes para agentes IA.
+
+    Orquestra todo o fluxo de teste: carregamento de dados,
+    simulação de conversas, avaliação LLM-as-Judge e persistência.
+
+    Attributes:
+        supabase (SupabaseClient): Cliente para acesso ao banco
+        evaluator (Evaluator): Avaliador LLM-as-Judge
+        reporter (ReportGenerator): Gerador de relatórios HTML
+        config (Dict): Configurações extras
+        anthropic_client (Anthropic): Cliente para simulação de agentes
 
     Workflow:
-    1. Carrega agent_version do Supabase
-    2. Carrega skill (se existir)
-    3. Carrega test cases
-    4. Executa cada caso de teste (simula conversa)
-    5. Envia para Evaluator (Claude Opus)
-    6. Agrega resultados
-    7. Gera relatorio HTML
-    8. Salva no Supabase
+        1. Carrega agent_version do Supabase
+        2. Carrega skill (se existir)
+        3. Carrega test cases (arquivo > skill > default)
+        4. Executa cada caso de teste (simula conversa)
+        5. Envia para Evaluator (Claude Opus)
+        6. Agrega resultados e calcula scores
+        7. Gera relatório HTML
+        8. Salva no Supabase
+
+    Example:
+        >>> runner = TestRunner(
+        ...     supabase_client=SupabaseClient(),
+        ...     evaluator=Evaluator(),
+        ...     report_generator=ReportGenerator()
+        ... )
+        >>> result = await runner.run_tests("uuid")
+        >>> print(f"Score: {result['overall_score']}")
     """
 
     def __init__(
@@ -118,6 +169,16 @@ class TestRunner:
         config: Dict = None,
         anthropic_api_key: str = None
     ):
+        """
+        Inicializa o TestRunner.
+
+        Args:
+            supabase_client: Cliente Supabase configurado.
+            evaluator: Evaluator para LLM-as-Judge.
+            report_generator: Gerador de relatórios.
+            config: Configurações extras (opcional).
+            anthropic_api_key: API key para simulação (opcional).
+        """
         self.supabase = supabase_client
         self.evaluator = evaluator
         self.reporter = report_generator
@@ -258,8 +319,20 @@ class TestRunner:
         test_suite_path: str = None
     ) -> List[Dict]:
         """
-        Carrega casos de teste.
-        Prioridade: test_suite_path > skill.test_cases > default
+        Carrega casos de teste com prioridade definida.
+
+        Ordem de prioridade:
+            1. test_suite_path: Arquivo JSON externo
+            2. skill.test_cases: Casos definidos na skill
+            3. DEFAULT_SDR_TEST_CASES: Casos padrão
+
+        Args:
+            agent: Dict com dados do agente.
+            skill: Dict com skill do agente (pode ser None).
+            test_suite_path: Caminho opcional para arquivo JSON.
+
+        Returns:
+            Lista de casos de teste a executar.
         """
         # Opcao 1: Arquivo de test suite
         if test_suite_path and Path(test_suite_path).exists():
@@ -281,7 +354,17 @@ class TestRunner:
         return self._get_default_test_cases(agent)
 
     def _get_default_test_cases(self, agent: Dict) -> List[Dict]:
-        """Retorna casos de teste default baseados no tipo de agente"""
+        """
+        Retorna casos de teste padrão baseados no tipo de agente.
+
+        Pode filtrar casos baseado nos modos identificados no agent_config.
+
+        Args:
+            agent: Dict com dados do agente.
+
+        Returns:
+            Lista de casos de teste apropriados para o agente.
+        """
         # Por enquanto, sempre retorna SDR test cases
         # Futuramente: detectar tipo de agente e retornar casos apropriados
 
@@ -323,7 +406,21 @@ class TestRunner:
     ) -> Dict:
         """
         Executa um caso de teste individual.
-        Simula conversa com o agente usando Claude.
+
+        Simula conversa com o agente usando Claude e retorna
+        a resposta para avaliação posterior.
+
+        Args:
+            agent: Dict com dados do agente.
+            skill: Dict com skill do agente (pode ser None).
+            test_case: Dict com caso de teste:
+                - name: Nome do teste
+                - input: Mensagem do lead
+                - expected_behavior: Comportamento esperado
+                - rubric_focus: Lista de dimensões a focar
+
+        Returns:
+            Dict com resultado do teste incluindo agent_response.
         """
         test_name = test_case.get('name', 'Unnamed Test')
         test_input = test_case.get('input', '')
@@ -357,7 +454,17 @@ class TestRunner:
 
     def _build_agent_prompt(self, agent: Dict, skill: Optional[Dict]) -> str:
         """
-        Constroi o system prompt para simular o agente.
+        Constrói o system prompt completo para simular o agente.
+
+        Combina o prompt base do agente com instruções da skill
+        se disponível.
+
+        Args:
+            agent: Dict com dados do agente (deve conter system_prompt).
+            skill: Dict com skill do agente (pode ser None).
+
+        Returns:
+            String com prompt completo para simulação.
         """
         # Prompt base do agente
         base_prompt = agent.get('system_prompt', '')
@@ -383,6 +490,16 @@ INSTRUCOES ADICIONAIS (SKILL):
     ) -> str:
         """
         Simula resposta do agente usando Claude.
+
+        Usa Claude Sonnet para simular o agente de forma rápida
+        e retorna a resposta que seria enviada ao lead.
+
+        Args:
+            system_prompt: Prompt completo do agente.
+            user_message: Mensagem do lead/usuário.
+
+        Returns:
+            String com resposta simulada do agente.
         """
         if not self.anthropic_client:
             return "[MOCK] Simulacao desabilitada - API key nao configurada"
@@ -421,13 +538,34 @@ async def run_quick_test(
     test_cases: List[Dict] = None
 ) -> Dict:
     """
-    Funcao helper para rodar teste rapido.
+    Função helper para rodar teste rápido sem setup manual.
 
-    Usage:
-        result = await run_quick_test(
-            agent_version_id="uuid-here",
-            test_cases=[{"name": "test1", "input": "Oi"}]
-        )
+    Cria todos os componentes necessários e executa testes
+    em uma única chamada.
+
+    Args:
+        agent_version_id: UUID do agente a testar.
+        supabase_url: URL do Supabase (opcional, usa env var).
+        supabase_key: Key do Supabase (opcional, usa env var).
+        anthropic_key: Key Anthropic (opcional, usa env var).
+        output_dir: Diretório para relatórios (opcional).
+        test_cases: Lista de casos de teste (opcional).
+
+    Returns:
+        Dict com resultado completo do teste:
+        - overall_score: Score geral (0-10)
+        - test_details: Detalhes completos
+        - report_url: URL do relatório HTML
+        - duration_ms: Duração do teste
+
+    Example:
+        >>> result = await run_quick_test(
+        ...     agent_version_id="uuid-here",
+        ...     test_cases=[
+        ...         {"name": "test1", "input": "Oi", "expected_behavior": "..."}
+        ...     ]
+        ... )
+        >>> print(f"Score: {result['overall_score']}")
     """
     # Inicializar componentes
     supabase = SupabaseClient(

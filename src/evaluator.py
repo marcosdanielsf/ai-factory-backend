@@ -1,14 +1,35 @@
 """
 AI Factory Testing Framework - Evaluator (LLM-as-Judge)
 =======================================================
-Avalia agentes usando Claude Opus como juiz.
 
-Rubrica de Avaliacao (5 dimensoes):
-1. Completeness (25%): BANT completo? Coletou todas as informacoes necessarias?
-2. Tone (20%): Tom consultivo e profissional?
-3. Engagement (20%): Lead engajou e permaneceu na conversa?
-4. Compliance (20%): Seguiu guardrails e instrucoes do prompt?
-5. Conversion (15%): Conseguiu converter/agendar/qualificar?
+Módulo de avaliação de agentes IA usando Claude Opus como juiz.
+Implementa o padrão LLM-as-Judge para avaliar respostas de agentes
+baseado em uma rubrica de 5 dimensões.
+
+Rubrica de Avaliação (5 dimensões):
+    1. Completeness (25%): BANT completo? Coletou todas as informações?
+    2. Tone (20%): Tom consultivo e profissional?
+    3. Engagement (20%): Lead engajou e permaneceu na conversa?
+    4. Compliance (20%): Seguiu guardrails e instruções do prompt?
+    5. Conversion (15%): Conseguiu converter/agendar/qualificar?
+
+Example:
+    >>> from src import Evaluator
+    >>> evaluator = Evaluator()
+    >>> result = await evaluator.evaluate(
+    ...     agent=agent_data,
+    ...     skill=skill_data,
+    ...     test_results=test_results
+    ... )
+    >>> print(f"Score: {result['overall_score']}")
+
+Environment Variables:
+    ANTHROPIC_API_KEY: Chave da API Anthropic (obrigatório)
+
+Scores:
+    - 0-5.9: Reprovado (needs improvement)
+    - 6.0-7.9: Aceitável mas precisa melhorar
+    - 8.0-10.0: Aprovado (framework_approved=True)
 """
 
 import os
@@ -25,7 +46,32 @@ class Evaluator:
     LLM-as-Judge para avaliar respostas de agentes IA.
 
     Usa Claude Opus para analisar conversas e atribuir scores
-    baseados em uma rubrica de 5 dimensoes.
+    baseados em uma rubrica de 5 dimensões ponderadas.
+
+    Attributes:
+        api_key (str): Chave da API Anthropic
+        client (Anthropic): Cliente Anthropic
+        model (str): Modelo a usar (default: claude-opus-4-20250514)
+        temperature (float): Temperatura para geração (default: 0.3)
+        max_tokens (int): Max tokens na resposta (default: 4000)
+
+    Dimensões de Avaliação:
+        - Completeness (25%): Qualificação BANT completa
+        - Tone (20%): Tom consultivo e profissional
+        - Engagement (20%): Engajamento do lead
+        - Compliance (20%): Aderência às instruções
+        - Conversion (15%): Conversão/agendamento
+
+    Example:
+        >>> evaluator = Evaluator()
+        >>> result = await evaluator.evaluate(
+        ...     agent={"name": "SDR", "system_prompt": "..."},
+        ...     skill=None,
+        ...     test_results=[{"name": "test1", "agent_response": "..."}]
+        ... )
+        >>> print(f"Score: {result['overall_score']}")
+        >>> print(f"Strengths: {result['strengths']}")
+        >>> print(f"Weaknesses: {result['weaknesses']}")
     """
 
     DEFAULT_RUBRIC = """
@@ -277,7 +323,18 @@ IMPORTANTE:
             return self._fallback_evaluation(str(e))
 
     def _extract_purpose(self, agent: Dict) -> str:
-        """Extrai o propósito do agente dos metadados"""
+        """
+        Extrai o propósito do agente dos metadados.
+
+        Tenta encontrar uma descrição do propósito em vários campos
+        possíveis do agent_config.
+
+        Args:
+            agent: Dict com dados do agente.
+
+        Returns:
+            String descrevendo o propósito do agente.
+        """
         # Tentar diferentes campos
         if agent.get('description'):
             return agent['description']
@@ -306,7 +363,19 @@ IMPORTANTE:
         return "Agente SDR para qualificação de leads"
 
     def _summarize_prompt(self, system_prompt: str, max_chars: int = 1000) -> str:
-        """Resume o prompt do sistema para o contexto"""
+        """
+        Resume o prompt do sistema para o contexto de avaliação.
+
+        Prioriza linhas importantes (regras, guardrails, objetivos)
+        e trunca o resto para caber no limite.
+
+        Args:
+            system_prompt: Prompt completo do agente.
+            max_chars: Limite de caracteres (default: 1000).
+
+        Returns:
+            Versão resumida do prompt.
+        """
         if not system_prompt:
             return "(Prompt não disponível)"
 
@@ -338,7 +407,18 @@ IMPORTANTE:
         return '\n'.join(summary_parts) + '\n...(resumido)'
 
     def _parse_evaluation_response(self, response_text: str) -> Dict:
-        """Extrai JSON da resposta do Claude"""
+        """
+        Extrai e parseia JSON da resposta do Claude.
+
+        Tenta múltiplas estratégias para extrair JSON válido
+        da resposta, incluindo remoção de markdown.
+
+        Args:
+            response_text: Resposta bruta do Claude.
+
+        Returns:
+            Dict com a avaliação parseada.
+        """
         # Tentar extrair JSON diretamente
         try:
             # Remover possíveis ```json e ``` do markdown
@@ -368,7 +448,18 @@ IMPORTANTE:
         return self._fallback_evaluation("Failed to parse evaluation response")
 
     def _validate_evaluation(self, evaluation: Dict) -> Dict:
-        """Valida e completa campos faltantes"""
+        """
+        Valida e completa campos faltantes na avaliação.
+
+        Garante que todos os campos obrigatórios existam e
+        recalcula o score geral para consistência.
+
+        Args:
+            evaluation: Dict com avaliação bruta do Claude.
+
+        Returns:
+            Dict validado com todos os campos obrigatórios.
+        """
         # Campos obrigatórios com defaults
         defaults = {
             'overall_score': 5.0,
@@ -414,7 +505,18 @@ IMPORTANTE:
         return evaluation
 
     def _fallback_evaluation(self, error_message: str) -> Dict:
-        """Retorna avaliação de fallback em caso de erro"""
+        """
+        Retorna avaliação de fallback em caso de erro.
+
+        Usado quando a avaliação com Claude falha por qualquer motivo.
+        Retorna score neutro (5.0) com mensagem de erro.
+
+        Args:
+            error_message: Descrição do erro ocorrido.
+
+        Returns:
+            Dict com avaliação padrão e mensagem de erro.
+        """
         return {
             'overall_score': 5.0,
             'scores': {
@@ -467,7 +569,27 @@ def evaluate_sync(
     api_key: str = None
 ) -> Dict:
     """
-    Avaliação síncrona - função wrapper para uso simples.
+    Função wrapper para avaliação síncrona simplificada.
+
+    Cria um Evaluator e executa avaliação em uma única chamada.
+    Útil para scripts e uso rápido.
+
+    Args:
+        agent: Dict com dados do agente (name, system_prompt, etc).
+        skill: Dict com skill do agente ou None.
+        test_results: Lista de resultados de testes executados.
+        api_key: Anthropic API key (opcional, usa env var).
+
+    Returns:
+        Dict com resultado da avaliação.
+
+    Example:
+        >>> result = evaluate_sync(
+        ...     agent={"name": "SDR", "system_prompt": "..."},
+        ...     skill=None,
+        ...     test_results=[{"name": "test1", "agent_response": "Oi!"}]
+        ... )
+        >>> print(f"Score: {result['overall_score']}")
     """
     evaluator = Evaluator(api_key=api_key)
     return evaluator.evaluate(agent, skill, test_results)

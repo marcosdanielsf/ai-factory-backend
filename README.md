@@ -1,22 +1,23 @@
-# 🏭 AI Factory V4 - Testing Framework
+# AI Factory V4 - Testing Framework
 
 Sistema completo de testes, validação e auto-melhoria para agentes IA.
+Usa LLM-as-Judge (Claude Opus) para avaliar agentes em 5 dimensões.
 
 ---
 
-## 🎯 O Que É
+## Visão Geral
 
-Framework Python que:
-- ✅ **Testa agentes** automaticamente com 20+ cenários
-- ✅ **Avalia com LLM-as-Judge** (Claude Opus)
-- ✅ **Gera relatórios HTML** profissionais
-- ✅ **Auto-melhora** agentes com score < 8.0
-- ✅ **Integra com Supabase** (source of truth)
-- ✅ **API REST** para integração com n8n
+O AI Factory Testing Framework automatiza o processo de:
+- **Testar agentes** com cenários realistas (20+ casos padrão)
+- **Avaliar com LLM-as-Judge** usando Claude Opus
+- **Gerar relatórios HTML** profissionais
+- **Auto-melhorar** agentes com score < 8.0 (Reflection Loop)
+- **Integrar com Supabase** como source of truth
+- **API REST** para integração com n8n e outros sistemas
 
 ---
 
-## 🏗️ Arquitetura
+## Arquitetura
 
 ```
 ┌─────────────────────────────────────┐
@@ -52,66 +53,300 @@ Framework Python que:
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
-### 1. Setup
+### 1. Instalação
 
 ```bash
-# Clone
+# Clone o repositório
 git clone https://github.com/mottivme/ai-factory-testing-framework
 cd ai-factory-testing-framework
 
-# Virtual environment
+# Criar ambiente virtual
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# Install
+# Instalar dependências
 pip install -r requirements.txt
 
-# Environment
+# Configurar variáveis de ambiente
 cp .env.example .env
-# Edit .env with your keys
+# Editar .env com suas chaves
 ```
 
-### 2. Run Migrations
+### 2. Configurar Variáveis de Ambiente
 
 ```bash
-# Set database URL
+# .env
+SUPABASE_URL=https://xxx.supabase.co
+SUPABASE_KEY=eyJhbG...
+ANTHROPIC_API_KEY=sk-ant-api...
+REPORTS_OUTPUT_DIR=./reports
+```
+
+### 3. Rodar Migrations
+
+```bash
+# Definir DATABASE_URL
 export DATABASE_URL='postgresql://user:pass@host:5432/db'
 
-# Run migrations
+# Executar migrations
 psql $DATABASE_URL -f migrations/001_add_testing_columns_to_agent_versions.sql
 psql $DATABASE_URL -f migrations/002_create_agenttest_test_results.sql
 psql $DATABASE_URL -f migrations/003_create_agenttest_skills.sql
 psql $DATABASE_URL -f migrations/004_create_dashboard_views.sql
 ```
 
-### 3. Test
+### 4. Iniciar Servidor
 
 ```bash
-# Test single agent (with Supabase)
-python test_e2e.py --agent-id <AGENT_VERSION_ID>
+# Desenvolvimento
+uvicorn main:app --reload --port 8000
 
-# Test offline (no Supabase needed)
-python test_offline.py
-
-# Auto-discover and test all pending
-python test_e2e.py
-```
-
-### 4. Start API Server
-
-```bash
-# Development
-uvicorn server:app --reload --port 8000
-
-# Production
-gunicorn server:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+# Produção
+gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 ```
 
 ---
 
-## 📁 Project Structure
+## Exemplos de Uso (curl)
+
+### Health Check
+
+```bash
+# Verificar status do servidor
+curl -X GET http://localhost:8000/health
+
+# Resposta esperada:
+# {
+#   "status": "healthy",
+#   "timestamp": "2024-01-15T10:30:00",
+#   "version": "1.0.0",
+#   "database": "connected"
+# }
+```
+
+### Ping (para load balancers)
+
+```bash
+curl -X GET http://localhost:8000/ping
+
+# Resposta:
+# {"message": "pong", "timestamp": "2024-01-15T10:30:00.123Z"}
+```
+
+### Rodar Teste Individual
+
+```bash
+curl -X POST http://localhost:8000/api/v1/test/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "uuid-do-agente",
+    "test_name": "Lead frio - primeira mensagem",
+    "input_text": "Oi",
+    "expected_behavior": "Cumprimento amigável + pergunta aberta",
+    "rubric_focus": ["tone", "engagement"]
+  }'
+
+# Resposta:
+# {
+#   "test_id": "test_123",
+#   "agent_id": "uuid-do-agente",
+#   "test_name": "Lead frio - primeira mensagem",
+#   "status": "completed",
+#   "score": 8.5,
+#   "feedback": "Boa abertura com tom amigável...",
+#   "execution_time": 2.3,
+#   "timestamp": "2024-01-15T10:30:00"
+# }
+```
+
+### Rodar Batch de Testes
+
+```bash
+curl -X POST http://localhost:8000/api/v1/test/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "uuid-do-agente",
+    "run_name": "Teste Completo SDR",
+    "test_cases": [
+      {
+        "agent_id": "uuid-do-agente",
+        "test_name": "Lead frio",
+        "input_text": "Oi",
+        "expected_behavior": "Cumprimento + pergunta",
+        "rubric_focus": ["tone", "engagement"]
+      },
+      {
+        "agent_id": "uuid-do-agente",
+        "test_name": "Pergunta de preço",
+        "input_text": "Quanto custa?",
+        "expected_behavior": "Âncora valor + qualificação",
+        "rubric_focus": ["compliance", "completeness"]
+      }
+    ]
+  }'
+
+# Resposta:
+# {
+#   "run_id": "batch_1705312200123",
+#   "agent_id": "uuid-do-agente",
+#   "test_count": 2,
+#   "status": "queued",
+#   "status_endpoint": "/api/v1/test/status/batch_1705312200123",
+#   "timestamp": "2024-01-15T10:30:00.123Z"
+# }
+```
+
+### Verificar Status de Batch
+
+```bash
+curl -X GET http://localhost:8000/api/v1/test/status/batch_1705312200123
+
+# Resposta (em progresso):
+# {
+#   "run_id": "batch_1705312200123",
+#   "status": "processing",
+#   "completed": 1,
+#   "total": 2
+# }
+
+# Resposta (completo):
+# {
+#   "run_id": "batch_1705312200123",
+#   "status": "completed",
+#   "overall_score": 8.2,
+#   "results": [...]
+# }
+```
+
+### Buscar Resultados de um Agente
+
+```bash
+curl -X GET "http://localhost:8000/api/v1/agents/uuid-do-agente/results?limit=5&offset=0"
+
+# Resposta:
+# {
+#   "agent_id": "uuid-do-agente",
+#   "count": 5,
+#   "results": [
+#     {
+#       "id": "test-result-uuid",
+#       "overall_score": 8.5,
+#       "test_details": {...},
+#       "created_at": "2024-01-15T10:30:00"
+#     },
+#     ...
+#   ]
+# }
+```
+
+### Buscar Métricas do Sistema
+
+```bash
+curl -X GET http://localhost:8000/api/v1/metrics
+
+# Resposta:
+# {
+#   "timestamp": "2024-01-15T10:30:00.123Z",
+#   "metrics": {
+#     "total_agents": 15,
+#     "total_tests": 234,
+#     "avg_score": 7.8
+#   }
+# }
+```
+
+---
+
+## Uso Programático (Python)
+
+### Teste Rápido
+
+```python
+import asyncio
+from src import run_quick_test
+
+async def main():
+    result = await run_quick_test(
+        agent_version_id="uuid-do-agente",
+        test_cases=[
+            {
+                "name": "Lead frio",
+                "input": "Oi",
+                "expected_behavior": "Cumprimento + pergunta"
+            }
+        ]
+    )
+    print(f"Score: {result['overall_score']}")
+    print(f"Report: {result['report_url']}")
+
+asyncio.run(main())
+```
+
+### Uso Completo
+
+```python
+from src import TestRunner, Evaluator, ReportGenerator, SupabaseClient
+
+# Inicializar componentes
+supabase = SupabaseClient()
+evaluator = Evaluator()
+reporter = ReportGenerator(output_dir="./reports")
+
+# Criar runner
+runner = TestRunner(
+    supabase_client=supabase,
+    evaluator=evaluator,
+    report_generator=reporter
+)
+
+# Executar testes
+result = await runner.run_tests("uuid-do-agente")
+
+print(f"Score: {result['overall_score']}")
+print(f"Strengths: {result['test_details']['strengths']}")
+print(f"Weaknesses: {result['test_details']['weaknesses']}")
+```
+
+### Avaliação Direta
+
+```python
+from src import Evaluator
+
+evaluator = Evaluator()
+
+result = await evaluator.evaluate(
+    agent={"name": "SDR", "system_prompt": "..."},
+    skill=None,
+    test_results=[
+        {"name": "test1", "input": "Oi", "agent_response": "Olá!"}
+    ]
+)
+
+print(f"Score: {result['overall_score']}")
+print(f"Scores: {result['scores']}")
+```
+
+---
+
+## Rubrica de Avaliação
+
+Agentes são avaliados em 5 dimensões:
+
+| Dimensão | Peso | Descrição |
+|----------|------|-----------|
+| **Completeness** | 25% | BANT completo? Coletou Budget, Authority, Need, Timeline? |
+| **Tone** | 20% | Tom consultivo e profissional? Empático? |
+| **Engagement** | 20% | Lead engajou? Conversa fluiu? |
+| **Compliance** | 20% | Seguiu guardrails e instruções? |
+| **Conversion** | 15% | Conseguiu converter/agendar? |
+
+**Threshold de aprovação:** Score >= 8.0
+
+---
+
+## Estrutura do Projeto
 
 ```
 ai-factory-testing-framework/
@@ -119,229 +354,109 @@ ai-factory-testing-framework/
 │   ├── 001_*.sql
 │   ├── 002_*.sql
 │   └── ...
-│
-├── src/                     # Python source
-│   ├── __init__.py          # ✅ DONE - Package exports
-│   ├── supabase_client.py   # ✅ DONE - Database client
-│   ├── test_runner.py       # ✅ DONE - Test orchestration
-│   ├── evaluator.py         # ✅ DONE - LLM-as-Judge (Claude Opus)
-│   ├── report_generator.py  # ✅ DONE - HTML reports
-│   ├── reflection_loop.py   # ⏳ TODO - Auto-improvement
-│   └── skill_loader.py      # ⏳ TODO - Skills from files
-│
-├── scripts/                 # Utility scripts
-│   ├── sync_skills_to_supabase.py
-│   ├── generate_knowledge_base.py
-│   └── ...
-│
-├── skills/                  # Skills (Markdown)
-│   ├── isabella-sdr/
-│   ├── assembly-line/
-│   └── _templates/
-│
-├── templates/               # Jinja2 templates
+├── src/                     # Código Python
+│   ├── __init__.py          # Package exports
+│   ├── supabase_client.py   # Cliente Supabase
+│   ├── test_runner.py       # Orquestrador de testes
+│   ├── evaluator.py         # LLM-as-Judge (Claude Opus)
+│   ├── report_generator.py  # Gerador de relatórios HTML
+│   └── reflection_loop.py   # Auto-melhoria (em desenvolvimento)
+├── templates/               # Templates Jinja2
 │   └── report.html
-│
-├── tests/                   # Unit tests
-│
-├── server.py                # FastAPI server
-├── config.yaml              # Configuration
-├── requirements.txt         # Python deps
-├── HANDOFF.md              # ⭐ START HERE
-└── README.md               # This file
+├── main.py                  # FastAPI application
+├── server.py                # Servidor alternativo
+├── config.yaml              # Configurações
+├── requirements.txt         # Dependências Python
+└── README.md                # Este arquivo
 ```
 
 ---
 
-## 📊 Database Schema
+## Deploy no Railway
 
-### New Tables
-
-1. **agenttest_test_results**
-   - Stores test results
-   - Links to agent_versions
-   - Includes scores, details, report URL
-
-2. **agenttest_skills**
-   - Stores skills (instructions, examples, rubric)
-   - Synced from Obsidian/local files
-   - Versioned per agent
-
-### Modified Tables
-
-1. **agent_versions**
-   - Added: `last_test_score`, `last_test_at`
-   - Added: `framework_approved`, `test_report_url`
-   - Added: `reflection_count`
-
-### New Views
-
-1. **vw_agent_performance_summary**
-2. **vw_latest_test_results**
-3. **vw_agent_conversations_summary**
-4. **vw_test_results_history**
-5. **vw_agents_needing_testing**
-
----
-
-## 🎨 Skills System
-
-Skills são arquivos Markdown que definem:
-- **INSTRUCTIONS.md**: Custom Instructions (para Claude Project)
-- **EXAMPLES.md**: Few-shot examples
-- **RUBRIC.md**: Evaluation criteria
-- **test-cases.json**: 20+ test scenarios
-
-**Sincronização:**
-- Local (Obsidian) ↔ Supabase (bidirecional)
-- Auto-geração de KNOWLEDGE.md com dados reais
-
----
-
-## 🧪 Testing
-
-### Test Suite Example
-
-```json
-{
-  "test_cases": [
-    {
-      "name": "Lead frio - primeira mensagem",
-      "input": "Oi",
-      "expected_behavior": "Pergunta aberta sobre interesse",
-      "rubric_focus": ["tone", "engagement"]
-    },
-    {
-      "name": "Lead pergunta preço",
-      "input": "Quanto custa?",
-      "expected_behavior": "Âncora valor + qualificação BANT",
-      "rubric_focus": ["compliance", "completeness"]
-    }
-  ]
-}
-```
-
-### Rubric (5 Dimensions)
-
-1. **Completeness (25%)**: BANT completo?
-2. **Tone (20%)**: Tom consultivo, empático?
-3. **Engagement (20%)**: Lead respondeu múltiplas vezes?
-4. **Compliance (20%)**: Seguiu guardrails?
-5. **Conversion (15%)**: Agendou/converteu?
-
-**Threshold:** 8.0/10 para aprovação
-
----
-
-## 🔄 Reflection Loop (Auto-Improvement)
-
-Workflow:
-1. Agent testa e recebe score < 8.0
-2. Framework analisa `weaknesses` e `failures`
-3. Gera prompt melhorado (v2)
-4. Cria nova `agent_version` com v2
-5. Testa v2 automaticamente
-6. Se v2 > v1: aprova e ativa
-7. Se v2 ≤ v1: rollback, mantém v1
-
----
-
-## 🌐 API Endpoints
-
-```
-POST   /api/test-agent           # Queue test
-GET    /api/agents                # List all agents
-GET    /api/agent/{id}            # Agent details
-GET    /api/agent/{id}/tests      # Test history
-GET    /api/agent/{id}/skill      # Current skill
-POST   /api/agent/{id}/skill      # Update skill
-GET    /api/test-results/{id}     # Test result details
-```
-
----
-
-## 📈 Metrics & Monitoring
-
-Dashboard mostra:
-- Score médio por agente
-- Conversas últimos 7/30 dias
-- Taxa de aprovação
-- Histórico de melhorias (reflection count)
-- Tokens consumidos / custo
-
----
-
-## 🔐 Environment Variables
+### Via CLI
 
 ```bash
-# Supabase
+# Login
+railway login
+
+# Inicializar projeto
+railway init
+
+# Deploy
+railway up
+```
+
+### Variáveis de Ambiente (Railway)
+
+```
 SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_KEY=eyJhb...
-SUPABASE_SERVICE_ROLE_KEY=eyJhb...  # Admin operations
-
-# Anthropic
+SUPABASE_KEY=eyJhbG...
 ANTHROPIC_API_KEY=sk-ant-api...
-
-# Optional
-SLACK_WEBHOOK_URL=https://hooks.slack.com/...
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8000
 ```
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
-### Common Issues
+### Erro: "SUPABASE_URL and SUPABASE_KEY must be set"
 
-1. **Migrations fail**
-   - Check `DATABASE_URL` is correct
-   - Ensure user has CREATE TABLE permissions
-   - Check if tables already exist
+Verifique se as variáveis de ambiente estão definidas:
+```bash
+echo $SUPABASE_URL
+echo $SUPABASE_KEY
+```
 
-2. **Claude Opus rate limit**
-   - Implement exponential backoff
-   - Reduce concurrent tests
-   - Use batching
+### Erro: "ANTHROPIC_API_KEY must be set"
 
-3. **Reports not generating**
-   - Check `/mnt/user-data/outputs/` permissions
-   - Verify Jinja2 template exists
-   - Check logs in `logs/framework.log`
+Defina a variável:
+```bash
+export ANTHROPIC_API_KEY=sk-ant-api...
+```
 
----
+### Rate Limit do Claude
 
-## 📚 Documentation
+Se encontrar rate limits:
+- Reduza concorrência de testes
+- Implemente exponential backoff
+- Use batching
 
-- **[HANDOFF.md](HANDOFF.md)** - ⭐ Start here for implementation
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design
-- **[API.md](API.md)** - API documentation
-- **[SKILLS.md](SKILLS.md)** - Skills system guide
+### Relatórios não sendo gerados
 
----
-
-## 🤝 Contributing
-
-1. Read `HANDOFF.md`
-2. Pick a task from TODO list
-3. Create feature branch
-4. Submit PR with tests
+Verifique:
+1. Permissões do diretório de saída
+2. Se o template existe em `templates/report.html`
+3. Logs em `logs/framework.log`
 
 ---
 
-## 📄 License
+## Documentação Adicional
+
+- **[API_REFERENCE.md](API_REFERENCE.md)** - Documentação completa da API
+- **[HANDOFF.md](HANDOFF.md)** - Guia de implementação
+- **[ARCHITECTURE.txt](ARCHITECTURE.txt)** - Design do sistema
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Solução de problemas
+
+---
+
+## Contribuindo
+
+1. Leia `HANDOFF.md`
+2. Escolha uma task do TODO
+3. Crie branch feature
+4. Submeta PR com testes
+
+---
+
+## Licença
 
 MIT License - Copyright (c) 2024 MOTTIVME
 
 ---
 
-## 🙏 Credits
-
-- **Marcos Daniels** - Product & Architecture
-- **Claude (Anthropic)** - Code generation
-- **AI Factory Team** - Testing & feedback
-
----
-
-## 📞 Support
+## Suporte
 
 - Slack: #ai-factory-testing
 - Email: dev@mottivme.com
@@ -349,4 +464,4 @@ MIT License - Copyright (c) 2024 MOTTIVME
 
 ---
 
-**Built with ❤️ by MOTTIVME**
+**Built with love by MOTTIVME**
