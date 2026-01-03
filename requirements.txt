@@ -13,6 +13,9 @@ pyyaml==6.0.1
 supabase==2.9.1
 # postgrest version is managed by supabase dependency
 
+# Async PostgreSQL (Connection Pooling)
+asyncpg==0.29.0
+
 # Anthropic Claude
 anthropic==0.39.0
 
