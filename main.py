@@ -2,12 +2,19 @@
 AI Factory Backend API - FastAPI Application
 ============================================
 High-performance API for AI testing framework deployed on Railway.
+
+Features:
+- Connection pooling with asyncpg
+- In-memory caching with TTL
+- Soft delete support
+- Background task processing
 """
 
 import os
 import json
 import logging
 import time
+import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
@@ -22,6 +29,7 @@ import uvicorn
 from src.supabase_client import SupabaseClient
 from src.test_runner import TestRunner
 from src.evaluator import Evaluator
+from src.database import DatabaseManager, get_database_manager, close_database_manager
 
 # Configure logging
 logging.basicConfig(
@@ -34,20 +42,49 @@ logger = logging.getLogger(__name__)
 # Global instances
 supabase_client: Optional[SupabaseClient] = None
 test_runner: Optional[TestRunner] = None
+db_manager: Optional[DatabaseManager] = None
+cache_cleanup_task: Optional[asyncio.Task] = None
+
+
+async def periodic_cache_cleanup():
+    """Tarefa de limpeza periódica do cache."""
+    while True:
+        try:
+            await asyncio.sleep(300)  # A cada 5 minutos
+            if db_manager:
+                count = await db_manager.cleanup_expired_cache()
+                if count > 0:
+                    logger.info(f"Cache cleanup: removed {count} expired entries")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Cache cleanup error: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown."""
-    global supabase_client, test_runner
+    global supabase_client, test_runner, db_manager, cache_cleanup_task
 
     # Startup
     logger.info("Starting AI Factory API...")
     try:
+        # Initialize DatabaseManager (connection pool + cache)
+        db_manager = await get_database_manager()
+        logger.info("DatabaseManager initialized (pool + cache)")
+
+        # Initialize Supabase client (fallback)
         supabase_client = SupabaseClient()
-        test_runner = TestRunner()
         logger.info("Supabase client initialized")
+
+        # Initialize test runner
+        test_runner = TestRunner()
         logger.info("Test runner initialized")
+
+        # Start periodic cache cleanup
+        cache_cleanup_task = asyncio.create_task(periodic_cache_cleanup())
+        logger.info("Cache cleanup task started")
+
     except Exception as e:
         logger.error(f"Failed to initialize clients: {e}")
         raise
@@ -56,6 +93,18 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down AI Factory API...")
+
+    # Cancel cache cleanup task
+    if cache_cleanup_task:
+        cache_cleanup_task.cancel()
+        try:
+            await cache_cleanup_task
+        except asyncio.CancelledError:
+            pass
+
+    # Close database connections
+    await close_database_manager()
+    logger.info("Database connections closed")
 
 
 # Initialize FastAPI app
@@ -87,6 +136,8 @@ class HealthCheckResponse(BaseModel):
     timestamp: datetime
     version: str
     database: str
+    pool: Optional[Dict[str, Any]] = None
+    cache: Optional[Dict[str, Any]] = None
 
 
 class TestCaseInput(BaseModel):
@@ -122,14 +173,22 @@ class BatchTestInput(BaseModel):
 @app.get("/health", response_model=HealthCheckResponse, tags=["Health"])
 async def health_check():
     """
-    Health check endpoint.
+    Health check endpoint with pool and cache stats.
 
     Returns:
-        HealthCheckResponse with status and version info
+        HealthCheckResponse with status, version, pool and cache info
     """
     try:
-        # Test Supabase connection
-        if supabase_client:
+        pool_stats = None
+        cache_stats = None
+
+        # Check DatabaseManager health
+        if db_manager:
+            health = await db_manager.healthcheck()
+            db_status = health.get("status", "unknown")
+            pool_stats = health.get("pool")
+            cache_stats = health.get("cache")
+        elif supabase_client:
             supabase_client.ping()
             db_status = "connected"
         else:
@@ -139,7 +198,9 @@ async def health_check():
             status="healthy",
             timestamp=datetime.utcnow(),
             version="1.0.0",
-            database=db_status
+            database=db_status,
+            pool=pool_stats,
+            cache=cache_stats
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -375,6 +436,107 @@ async def get_metrics():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve metrics: {str(e)}"
+        )
+
+
+# ============================================
+# ADMIN ENDPOINTS (Cache & Pool Management)
+# ============================================
+
+@app.get("/api/v1/admin/stats", tags=["Admin"])
+async def get_admin_stats():
+    """
+    Get detailed database pool and cache statistics.
+
+    Returns:
+        Pool and cache stats for monitoring
+    """
+    if not db_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DatabaseManager not available"
+        )
+
+    try:
+        health = await db_manager.healthcheck()
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "database": health,
+            "pool": db_manager.pool.get_stats(),
+            "cache": db_manager._cache.get_stats()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get admin stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@app.post("/api/v1/admin/cache/clear", tags=["Admin"])
+async def clear_cache(namespace: Optional[str] = None):
+    """
+    Clear cache entries.
+
+    Args:
+        namespace: Optional namespace to clear (all if not specified)
+
+    Returns:
+        Number of entries cleared
+    """
+    if not db_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DatabaseManager not available"
+        )
+
+    try:
+        count = await db_manager.clear_cache(namespace)
+        return {
+            "success": True,
+            "cleared": count,
+            "namespace": namespace or "all",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Failed to clear cache: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@app.get("/api/v1/admin/cache/namespaces", tags=["Admin"])
+async def get_cache_namespaces():
+    """
+    List all cache namespaces and their entry counts.
+
+    Returns:
+        Dict of namespace -> count
+    """
+    if not db_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DatabaseManager not available"
+        )
+
+    try:
+        # Get all cache keys and group by namespace
+        namespaces: Dict[str, int] = {}
+        for key in db_manager._cache._cache.keys():
+            ns = key.split(":")[0] if ":" in key else "default"
+            namespaces[ns] = namespaces.get(ns, 0) + 1
+
+        return {
+            "namespaces": namespaces,
+            "total_entries": sum(namespaces.values()),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get cache namespaces: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )
 
 

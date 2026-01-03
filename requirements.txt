@@ -11,6 +11,9 @@ pyyaml==6.0.1
 supabase==2.3.0
 postgrest==0.13.0
 
+# Async PostgreSQL (Connection Pooling)
+asyncpg==0.29.0
+
 # Anthropic Claude
 anthropic==0.39.0
 
