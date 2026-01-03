@@ -28,6 +28,9 @@ markdown==3.5.2
 httpx<0.25.0,>=0.24.0
 aiofiles==23.2.1
 tenacity==8.2.3  # Retry logic
+slowapi==0.1.9  # Rate limiting
+redis==5.0.0  # Optional: Redis backend for rate limiting
+psutil==5.9.8  # System metrics
 
 # Testing
 pytest==7.4.4
