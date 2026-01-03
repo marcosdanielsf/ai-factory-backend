@@ -1,50 +1,44 @@
 """
 AI Factory Testing Framework - Evaluator (LLM-as-Judge)
 =======================================================
-Avalia agentes usando Claude Opus como juiz.
-Com retry logic, logging estruturado e error handling robusto.
 
-Rubrica de Avaliacao (5 dimensoes):
-1. Completeness (25%): BANT completo? Coletou todas as informacoes necessarias?
-2. Tone (20%): Tom consultivo e profissional?
-3. Engagement (20%): Lead engajou e permaneceu na conversa?
-4. Compliance (20%): Seguiu guardrails e instrucoes do prompt?
-5. Conversion (15%): Conseguiu converter/agendar/qualificar?
+Módulo de avaliação de agentes IA usando Claude Opus como juiz.
+Implementa o padrão LLM-as-Judge para avaliar respostas de agentes
+baseado em uma rubrica de 5 dimensões.
+
+Rubrica de Avaliação (5 dimensões):
+    1. Completeness (25%): BANT completo? Coletou todas as informações?
+    2. Tone (20%): Tom consultivo e profissional?
+    3. Engagement (20%): Lead engajou e permaneceu na conversa?
+    4. Compliance (20%): Seguiu guardrails e instruções do prompt?
+    5. Conversion (15%): Conseguiu converter/agendar/qualificar?
+
+Example:
+    >>> from src import Evaluator
+    >>> evaluator = Evaluator()
+    >>> result = await evaluator.evaluate(
+    ...     agent=agent_data,
+    ...     skill=skill_data,
+    ...     test_results=test_results
+    ... )
+    >>> print(f"Score: {result['overall_score']}")
+
+Environment Variables:
+    ANTHROPIC_API_KEY: Chave da API Anthropic (obrigatório)
+
+Scores:
+    - 0-5.9: Reprovado (needs improvement)
+    - 6.0-7.9: Aceitável mas precisa melhorar
+    - 8.0-10.0: Aprovado (framework_approved=True)
 """
 
 import os
 import json
-import re
+import logging
 from typing import Dict, List, Optional, Any
-from anthropic import Anthropic, APIError, RateLimitError as AnthropicRateLimitError
+from anthropic import Anthropic
 
-from src.core.logging_config import get_logger, LogContext, Timer
-from src.core.retry import with_retry, ANTHROPIC_RETRY_CONFIG, RetryConfig
-from src.core.exceptions import (
-    AnthropicAPIError,
-    AnthropicRateLimitError as CustomRateLimitError,
-    ValidationError,
-)
-
-logger = get_logger(__name__)
-
-
-# Custom retry config for evaluation (longer timeouts, more retries)
-EVALUATOR_RETRY_CONFIG = RetryConfig(
-    max_attempts=5,
-    initial_delay_seconds=3.0,
-    max_delay_seconds=180.0,
-    exponential_base=2.0,
-    jitter=True,
-    retry_on_exceptions=(
-        AnthropicAPIError,
-        CustomRateLimitError,
-        APIError,
-        AnthropicRateLimitError,
-        ConnectionError,
-        TimeoutError,
-    ),
-)
+logger = logging.getLogger(__name__)
 
 
 class Evaluator:
@@ -52,13 +46,32 @@ class Evaluator:
     LLM-as-Judge para avaliar respostas de agentes IA.
 
     Usa Claude Opus para analisar conversas e atribuir scores
-    baseados em uma rubrica de 5 dimensoes.
+    baseados em uma rubrica de 5 dimensões ponderadas.
 
-    Features:
-    - Retry automático em chamadas à API Anthropic
-    - Logging estruturado com métricas de performance
-    - Error handling específico para diferentes tipos de falha
-    - Tracking de tokens utilizados
+    Attributes:
+        api_key (str): Chave da API Anthropic
+        client (Anthropic): Cliente Anthropic
+        model (str): Modelo a usar (default: claude-opus-4-20250514)
+        temperature (float): Temperatura para geração (default: 0.3)
+        max_tokens (int): Max tokens na resposta (default: 4000)
+
+    Dimensões de Avaliação:
+        - Completeness (25%): Qualificação BANT completa
+        - Tone (20%): Tom consultivo e profissional
+        - Engagement (20%): Engajamento do lead
+        - Compliance (20%): Aderência às instruções
+        - Conversion (15%): Conversão/agendamento
+
+    Example:
+        >>> evaluator = Evaluator()
+        >>> result = await evaluator.evaluate(
+        ...     agent={"name": "SDR", "system_prompt": "..."},
+        ...     skill=None,
+        ...     test_results=[{"name": "test1", "agent_response": "..."}]
+        ... )
+        >>> print(f"Score: {result['overall_score']}")
+        >>> print(f"Strengths: {result['strengths']}")
+        >>> print(f"Weaknesses: {result['weaknesses']}")
     """
 
     DEFAULT_RUBRIC = """
@@ -212,7 +225,7 @@ IMPORTANTE:
         api_key: str = None,
         model: str = "claude-opus-4-20250514",
         temperature: float = 0.3,
-        max_tokens: int = 4000,
+        max_tokens: int = 4000
     ):
         """
         Inicializa o Evaluator.
@@ -222,130 +235,23 @@ IMPORTANTE:
             model: Modelo a usar para avaliação
             temperature: Temperatura para geração
             max_tokens: Max tokens na resposta
-
-        Raises:
-            ValidationError: If API key is not configured
         """
         self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
         if not self.api_key:
-            raise ValidationError(
-                message="ANTHROPIC_API_KEY must be set",
-                field="api_key",
-            )
+            raise ValueError("ANTHROPIC_API_KEY must be set")
 
         self.client = Anthropic(api_key=self.api_key)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        logger.info(
-            "Evaluator initialized",
-            extra_fields={
-                "model": self.model,
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
-            },
-        )
-
-    @with_retry(config=EVALUATOR_RETRY_CONFIG)
-    async def _call_anthropic(self, prompt: str) -> Dict[str, Any]:
-        """
-        Call Anthropic API with retry logic.
-
-        Args:
-            prompt: The evaluation prompt
-
-        Returns:
-            Dict with response text and token usage
-
-        Raises:
-            AnthropicAPIError: On API failures after retries exhausted
-        """
-        with Timer() as timer:
-            try:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ]
-                )
-
-                # Extract usage metrics
-                input_tokens = response.usage.input_tokens
-                output_tokens = response.usage.output_tokens
-                response_text = response.content[0].text
-
-                logger.info(
-                    "Anthropic API call completed",
-                    extra_fields={
-                        "model": self.model,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "total_tokens": input_tokens + output_tokens,
-                        "duration_ms": timer.duration_ms,
-                    },
-                )
-
-                return {
-                    "text": response_text,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "duration_ms": timer.duration_ms,
-                }
-
-            except AnthropicRateLimitError as e:
-                logger.warning(
-                    "Anthropic rate limit hit",
-                    extra_fields={
-                        "model": self.model,
-                        "error": str(e),
-                    },
-                )
-                raise CustomRateLimitError(
-                    message="Anthropic API rate limit exceeded",
-                    retry_after=60,
-                    original_error=e,
-                )
-
-            except APIError as e:
-                logger.error(
-                    "Anthropic API error",
-                    extra_fields={
-                        "model": self.model,
-                        "status_code": getattr(e, 'status_code', None),
-                        "error": str(e),
-                    },
-                )
-                raise AnthropicAPIError(
-                    message=f"Anthropic API error: {str(e)}",
-                    details={"status_code": getattr(e, 'status_code', None)},
-                    original_error=e,
-                )
-
-            except Exception as e:
-                logger.error(
-                    "Unexpected error calling Anthropic",
-                    extra_fields={
-                        "model": self.model,
-                        "error_type": type(e).__name__,
-                        "error": str(e),
-                    },
-                )
-                raise AnthropicAPIError(
-                    message=f"Unexpected error: {str(e)}",
-                    original_error=e,
-                )
+        logger.info(f"Evaluator initialized with model: {self.model}")
 
     async def evaluate(
         self,
         agent: Dict,
         skill: Optional[Dict],
-        test_results: List[Dict],
+        test_results: List[Dict]
     ) -> Dict:
         """
         Avalia um agente baseado nos resultados dos testes.
@@ -358,97 +264,77 @@ IMPORTANTE:
         Returns:
             Dict com scores, strengths, weaknesses, failures, warnings
         """
-        agent_name = agent.get('name', agent.get('id', 'unknown'))
+        logger.info(f"Evaluating agent: {agent.get('name', agent.get('id', 'unknown'))}")
 
-        with LogContext(operation="evaluate_agent", agent_name=agent_name):
-            with Timer() as total_timer:
-                logger.info(
-                    "Starting agent evaluation",
-                    extra_fields={
-                        "agent_id": agent.get('id'),
-                        "test_count": len(test_results),
-                    },
-                )
+        # Preparar contexto do agente
+        agent_name = agent.get('name', 'Agente Desconhecido')
+        agent_purpose = self._extract_purpose(agent)
+        system_prompt_summary = self._summarize_prompt(agent.get('system_prompt', ''))
 
-                # Preparar contexto do agente
-                agent_purpose = self._extract_purpose(agent)
-                system_prompt_summary = self._summarize_prompt(agent.get('system_prompt', ''))
+        # Usar rubrica do skill ou default
+        rubric = self.DEFAULT_RUBRIC
+        if skill and skill.get('rubric'):
+            rubric = skill['rubric']
 
-                # Usar rubrica do skill ou default
-                rubric = self.DEFAULT_RUBRIC
-                if skill and skill.get('rubric'):
-                    rubric = skill['rubric']
+        # Formatar casos de teste
+        test_cases_json = json.dumps(test_results, ensure_ascii=False, indent=2)
 
-                # Formatar casos de teste
-                test_cases_json = json.dumps(test_results, ensure_ascii=False, indent=2)
+        # Montar prompt
+        evaluation_prompt = self.EVALUATION_PROMPT_TEMPLATE.format(
+            agent_name=agent_name,
+            agent_purpose=agent_purpose,
+            system_prompt_summary=system_prompt_summary,
+            rubric=rubric,
+            test_cases_json=test_cases_json
+        )
 
-                # Montar prompt
-                evaluation_prompt = self.EVALUATION_PROMPT_TEMPLATE.format(
-                    agent_name=agent_name,
-                    agent_purpose=agent_purpose,
-                    system_prompt_summary=system_prompt_summary,
-                    rubric=rubric,
-                    test_cases_json=test_cases_json,
-                )
-
-                try:
-                    # Chamar Claude Opus com retry
-                    api_response = await self._call_anthropic(evaluation_prompt)
-
-                    # Parsear JSON da resposta
-                    evaluation = self._parse_evaluation_response(api_response["text"])
-
-                    # Validar e completar campos faltantes
-                    evaluation = self._validate_evaluation(evaluation)
-
-                    # Adicionar métricas da API
-                    evaluation["_metadata"] = {
-                        "model": self.model,
-                        "input_tokens": api_response["input_tokens"],
-                        "output_tokens": api_response["output_tokens"],
-                        "api_duration_ms": api_response["duration_ms"],
-                        "total_duration_ms": total_timer.duration_ms,
+        try:
+            # Chamar Claude Opus
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": evaluation_prompt
                     }
+                ]
+            )
 
-                    logger.info(
-                        "Agent evaluation completed",
-                        extra_fields={
-                            "agent_id": agent.get('id'),
-                            "overall_score": evaluation['overall_score'],
-                            "input_tokens": api_response["input_tokens"],
-                            "output_tokens": api_response["output_tokens"],
-                            "duration_ms": total_timer.duration_ms,
-                        },
-                    )
+            # Extrair resposta
+            response_text = response.content[0].text
 
-                    return evaluation
+            # Parsear JSON da resposta
+            evaluation = self._parse_evaluation_response(response_text)
 
-                except (AnthropicAPIError, CustomRateLimitError) as e:
-                    logger.error(
-                        "Evaluation failed due to API error",
-                        extra_fields={
-                            "agent_id": agent.get('id'),
-                            "error_code": getattr(e, 'error_code', None),
-                            "error": str(e),
-                        },
-                    )
-                    # Retornar avaliação de fallback
-                    return self._fallback_evaluation(str(e))
+            # Validar e completar campos faltantes
+            evaluation = self._validate_evaluation(evaluation)
 
-                except Exception as e:
-                    logger.error(
-                        "Unexpected error during evaluation",
-                        extra_fields={
-                            "agent_id": agent.get('id'),
-                            "error_type": type(e).__name__,
-                            "error": str(e),
-                        },
-                        exc_info=True,
-                    )
-                    return self._fallback_evaluation(str(e))
+            logger.info(
+                f"Evaluation complete: overall_score={evaluation['overall_score']:.2f}"
+            )
+
+            return evaluation
+
+        except Exception as e:
+            logger.error(f"Error during evaluation: {e}", exc_info=True)
+            # Retornar avaliação de fallback
+            return self._fallback_evaluation(str(e))
 
     def _extract_purpose(self, agent: Dict) -> str:
-        """Extrai o propósito do agente dos metadados"""
+        """
+        Extrai o propósito do agente dos metadados.
+
+        Tenta encontrar uma descrição do propósito em vários campos
+        possíveis do agent_config.
+
+        Args:
+            agent: Dict com dados do agente.
+
+        Returns:
+            String descrevendo o propósito do agente.
+        """
         # Tentar diferentes campos
         if agent.get('description'):
             return agent['description']
@@ -457,7 +343,7 @@ IMPORTANTE:
         if isinstance(config, str):
             try:
                 config = json.loads(config)
-            except json.JSONDecodeError:
+            except:
                 config = {}
 
         if config.get('proposito'):
@@ -470,14 +356,26 @@ IMPORTANTE:
         prompt = agent.get('system_prompt', '')
         if prompt:
             # Pegar primeira linha significativa
-            lines = [line.strip() for line in prompt.split('\n') if line.strip()]
+            lines = [l.strip() for l in prompt.split('\n') if l.strip()]
             if lines:
                 return lines[0][:200]
 
         return "Agente SDR para qualificação de leads"
 
     def _summarize_prompt(self, system_prompt: str, max_chars: int = 1000) -> str:
-        """Resume o prompt do sistema para o contexto"""
+        """
+        Resume o prompt do sistema para o contexto de avaliação.
+
+        Prioriza linhas importantes (regras, guardrails, objetivos)
+        e trunca o resto para caber no limite.
+
+        Args:
+            system_prompt: Prompt completo do agente.
+            max_chars: Limite de caracteres (default: 1000).
+
+        Returns:
+            Versão resumida do prompt.
+        """
         if not system_prompt:
             return "(Prompt não disponível)"
 
@@ -509,7 +407,18 @@ IMPORTANTE:
         return '\n'.join(summary_parts) + '\n...(resumido)'
 
     def _parse_evaluation_response(self, response_text: str) -> Dict:
-        """Extrai JSON da resposta do Claude"""
+        """
+        Extrai e parseia JSON da resposta do Claude.
+
+        Tenta múltiplas estratégias para extrair JSON válido
+        da resposta, incluindo remoção de markdown.
+
+        Args:
+            response_text: Resposta bruta do Claude.
+
+        Returns:
+            Dict com a avaliação parseada.
+        """
         # Tentar extrair JSON diretamente
         try:
             # Remover possíveis ```json e ``` do markdown
@@ -526,6 +435,7 @@ IMPORTANTE:
             pass
 
         # Tentar encontrar JSON no texto
+        import re
         json_match = re.search(r'\{[\s\S]*\}', response_text)
         if json_match:
             try:
@@ -534,14 +444,22 @@ IMPORTANTE:
                 pass
 
         # Se falhou, criar estrutura a partir do texto
-        logger.warning(
-            "Could not parse JSON response, using fallback",
-            extra_fields={"response_length": len(response_text)},
-        )
+        logger.warning("Could not parse JSON response, using fallback")
         return self._fallback_evaluation("Failed to parse evaluation response")
 
     def _validate_evaluation(self, evaluation: Dict) -> Dict:
-        """Valida e completa campos faltantes"""
+        """
+        Valida e completa campos faltantes na avaliação.
+
+        Garante que todos os campos obrigatórios existam e
+        recalcula o score geral para consistência.
+
+        Args:
+            evaluation: Dict com avaliação bruta do Claude.
+
+        Returns:
+            Dict validado com todos os campos obrigatórios.
+        """
         # Campos obrigatórios com defaults
         defaults = {
             'overall_score': 5.0,
@@ -587,11 +505,18 @@ IMPORTANTE:
         return evaluation
 
     def _fallback_evaluation(self, error_message: str) -> Dict:
-        """Retorna avaliação de fallback em caso de erro"""
-        logger.warning(
-            "Using fallback evaluation",
-            extra_fields={"error": error_message},
-        )
+        """
+        Retorna avaliação de fallback em caso de erro.
+
+        Usado quando a avaliação com Claude falha por qualquer motivo.
+        Retorna score neutro (5.0) com mensagem de erro.
+
+        Args:
+            error_message: Descrição do erro ocorrido.
+
+        Returns:
+            Dict com avaliação padrão e mensagem de erro.
+        """
         return {
             'overall_score': 5.0,
             'scores': {
@@ -606,11 +531,7 @@ IMPORTANTE:
             'weaknesses': [],
             'failures': [f"Evaluation failed: {error_message}"],
             'warnings': ["Fallback evaluation used due to error"],
-            'recommendations': ["Re-run evaluation after fixing the error"],
-            '_metadata': {
-                'is_fallback': True,
-                'error': error_message,
-            }
+            'recommendations': ["Re-run evaluation after fixing the error"]
         }
 
     def calculate_weighted_score(self, scores: Dict[str, float]) -> float:
@@ -641,14 +562,34 @@ IMPORTANTE:
 
 
 # Alias para uso direto
-async def evaluate_async(
+def evaluate_sync(
     agent: Dict,
     skill: Optional[Dict],
     test_results: List[Dict],
-    api_key: str = None,
+    api_key: str = None
 ) -> Dict:
     """
-    Avaliação assíncrona - função wrapper para uso simples.
+    Função wrapper para avaliação síncrona simplificada.
+
+    Cria um Evaluator e executa avaliação em uma única chamada.
+    Útil para scripts e uso rápido.
+
+    Args:
+        agent: Dict com dados do agente (name, system_prompt, etc).
+        skill: Dict com skill do agente ou None.
+        test_results: Lista de resultados de testes executados.
+        api_key: Anthropic API key (opcional, usa env var).
+
+    Returns:
+        Dict com resultado da avaliação.
+
+    Example:
+        >>> result = evaluate_sync(
+        ...     agent={"name": "SDR", "system_prompt": "..."},
+        ...     skill=None,
+        ...     test_results=[{"name": "test1", "agent_response": "Oi!"}]
+        ... )
+        >>> print(f"Score: {result['overall_score']}")
     """
     evaluator = Evaluator(api_key=api_key)
-    return await evaluator.evaluate(agent, skill, test_results)
+    return evaluator.evaluate(agent, skill, test_results)

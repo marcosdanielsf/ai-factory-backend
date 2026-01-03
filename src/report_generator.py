@@ -1,7 +1,30 @@
 """
 AI Factory Testing Framework - Report Generator
 ================================================
-Gera relatorios HTML dos testes de agentes.
+
+Gerador de relatórios HTML para testes de agentes IA.
+Usa templates Jinja2 para criar relatórios visuais e informativos
+com scores, gráficos e detalhes dos testes.
+
+Features:
+    - Relatórios HTML responsivos com TailwindCSS
+    - Visualização de scores por dimensão
+    - Lista de testes com feedback individual
+    - Seções de strengths, weaknesses e recommendations
+    - Suporte a templates customizados
+
+Example:
+    >>> from src import ReportGenerator
+    >>> reporter = ReportGenerator(output_dir="./reports")
+    >>> url = await reporter.generate_html_report(
+    ...     agent=agent_data,
+    ...     evaluation=evaluation_result,
+    ...     test_results=test_results
+    ... )
+    >>> print(f"Report: {url}")
+
+Environment Variables:
+    REPORTS_OUTPUT_DIR: Diretório para salvar relatórios
 """
 
 import os
@@ -21,7 +44,26 @@ class ReportGenerator:
     """
     Gerador de relatórios HTML para testes de agentes.
 
-    Usa templates Jinja2 para criar relatórios bonitos e informativos.
+    Usa templates Jinja2 para criar relatórios visuais e informativos.
+    Suporta templates customizados e fallback inline.
+
+    Attributes:
+        output_dir (str): Diretório para salvar relatórios
+        templates_dir (str): Diretório com templates Jinja2
+        public_url_base (str): URL base para links públicos
+        jinja_env (Environment): Ambiente Jinja2 configurado
+
+    Example:
+        >>> reporter = ReportGenerator(
+        ...     output_dir="./reports",
+        ...     public_url_base="https://reports.example.com"
+        ... )
+        >>> url = await reporter.generate_html_report(
+        ...     agent=agent_data,
+        ...     evaluation=evaluation_result,
+        ...     test_results=test_results
+        ... )
+        >>> print(f"Report URL: {url}")
     """
 
     def __init__(
@@ -34,9 +76,22 @@ class ReportGenerator:
         Inicializa o ReportGenerator.
 
         Args:
-            output_dir: Diretório para salvar relatórios
-            templates_dir: Diretório com templates Jinja2
-            public_url_base: URL base para relatórios públicos
+            output_dir: Diretório para salvar relatórios.
+                Default: REPORTS_OUTPUT_DIR ou /mnt/user-data/outputs/test-reports/
+            templates_dir: Diretório com templates Jinja2.
+                Default: ../templates relativo ao módulo
+            public_url_base: URL base para relatórios públicos.
+                Se não definido, retorna caminho local.
+
+        Example:
+            >>> # Usando defaults
+            >>> reporter = ReportGenerator()
+            >>>
+            >>> # Customizado
+            >>> reporter = ReportGenerator(
+            ...     output_dir="/var/reports",
+            ...     public_url_base="https://cdn.example.com/reports"
+            ... )
         """
         # Diretório de saída
         self.output_dir = output_dir or os.getenv(
@@ -129,7 +184,20 @@ class ReportGenerator:
         evaluation: Dict,
         test_results: List[Dict]
     ) -> Dict:
-        """Prepara contexto para o template"""
+        """
+        Prepara contexto completo para o template Jinja2.
+
+        Combina dados do agente, avaliação e testes em um único
+        dicionário pronto para renderização.
+
+        Args:
+            agent: Dict com dados do agente.
+            evaluation: Dict com resultado da avaliação.
+            test_results: Lista de resultados dos testes.
+
+        Returns:
+            Dict com todos os dados formatados para o template.
+        """
         # Extrair informações do agente
         agent_name = agent.get('name', 'Agente Desconhecido')
         agent_version = agent.get('version', 1)
@@ -209,7 +277,18 @@ class ReportGenerator:
         }
 
     def _generate_fallback_html(self, context: Dict) -> str:
-        """Gera HTML de fallback quando template não está disponível"""
+        """
+        Gera HTML inline quando template Jinja2 não está disponível.
+
+        Template completo com TailwindCSS incluído via CDN.
+        Usado como fallback quando o arquivo template não existe.
+
+        Args:
+            context: Dict com dados preparados por _prepare_context.
+
+        Returns:
+            String HTML completa pronta para salvar.
+        """
         return f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -415,7 +494,28 @@ async def generate_report(
     output_dir: str = None
 ) -> str:
     """
-    Gera relatório de forma simplificada.
+    Gera relatório HTML de forma simplificada.
+
+    Função wrapper que cria ReportGenerator e gera relatório
+    em uma única chamada.
+
+    Args:
+        agent: Dict com dados do agente.
+        evaluation: Dict com resultado da avaliação.
+        test_results: Lista de resultados dos testes.
+        output_dir: Diretório para salvar (opcional).
+
+    Returns:
+        URL ou caminho do relatório gerado.
+
+    Example:
+        >>> url = await generate_report(
+        ...     agent={"id": "uuid", "name": "SDR"},
+        ...     evaluation={"overall_score": 8.5, ...},
+        ...     test_results=[...],
+        ...     output_dir="./reports"
+        ... )
+        >>> print(f"Report: {url}")
     """
     generator = ReportGenerator(output_dir=output_dir)
     return await generator.generate_html_report(agent, evaluation, test_results)
