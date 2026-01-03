@@ -1,19 +1,17 @@
 """
-AI Factory - Retry Logic with Tenacity
-=======================================
+Retry logic utilities using tenacity.
 
-Retry strategies para diferentes tipos de operações:
-- Database (Supabase)
-- External APIs (Anthropic, etc)
-- Network requests
-
-Usa tenacity para exponential backoff com jitter.
+Provides:
+- Configurable retry decorators for different scenarios
+- Specific retry configs for Anthropic API, Supabase, etc.
+- Exponential backoff with jitter
+- Custom retry conditions
 """
 
-import functools
-from typing import Callable, TypeVar, Optional, Tuple, Type
-from dataclasses import dataclass
 import random
+from typing import Callable, Optional, Type, Tuple, Union
+from dataclasses import dataclass, field
+from functools import wraps
 
 from tenacity import (
     retry,
@@ -22,282 +20,239 @@ from tenacity import (
     wait_exponential,
     wait_random_exponential,
     retry_if_exception_type,
-    retry_if_exception,
+    retry_if_result,
     before_sleep_log,
     after_log,
     RetryError,
 )
 
-from .errors import (
+from .logging_config import get_logger
+from .exceptions import (
     AIFactoryError,
     DatabaseError,
-    ExternalServiceError,
+    ExternalAPIError,
+    AnthropicAPIError,
+    AnthropicRateLimitError,
     RateLimitError,
     TimeoutError,
 )
 
-T = TypeVar('T')
+logger = get_logger(__name__)
 
 
 @dataclass
 class RetryConfig:
-    """Configuração para retry logic"""
+    """Configuration for retry behavior."""
+
     max_attempts: int = 3
     max_delay_seconds: float = 60.0
-    initial_wait_seconds: float = 1.0
-    max_wait_seconds: float = 30.0
+    initial_delay_seconds: float = 1.0
     exponential_base: float = 2.0
     jitter: bool = True
-    retry_on_timeout: bool = True
-    retry_on_rate_limit: bool = True
-    retry_on_server_error: bool = True
+    retry_on_exceptions: Tuple[Type[Exception], ...] = (Exception,)
 
-    # Códigos HTTP que devem triggear retry
-    retryable_status_codes: Tuple[int, ...] = (429, 500, 502, 503, 504)
+    def __post_init__(self):
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
 
 
-# Configs padrão para diferentes cenários
-DATABASE_RETRY_CONFIG = RetryConfig(
-    max_attempts=5,
-    initial_wait_seconds=0.5,
-    max_wait_seconds=15.0,
-    exponential_base=2.0,
-    jitter=True,
-)
-
+# Pre-configured retry configs for common scenarios
 ANTHROPIC_RETRY_CONFIG = RetryConfig(
-    max_attempts=3,
-    initial_wait_seconds=2.0,
-    max_wait_seconds=60.0,
+    max_attempts=5,
+    initial_delay_seconds=2.0,
+    max_delay_seconds=120.0,
     exponential_base=2.0,
     jitter=True,
-    retry_on_rate_limit=True,
+    retry_on_exceptions=(
+        AnthropicAPIError,
+        AnthropicRateLimitError,
+        ConnectionError,
+        TimeoutError,
+    ),
 )
 
-EXTERNAL_API_RETRY_CONFIG = RetryConfig(
-    max_attempts=3,
-    initial_wait_seconds=1.0,
-    max_wait_seconds=30.0,
+SUPABASE_RETRY_CONFIG = RetryConfig(
+    max_attempts=4,
+    initial_delay_seconds=1.0,
+    max_delay_seconds=30.0,
     exponential_base=2.0,
     jitter=True,
+    retry_on_exceptions=(
+        DatabaseError,
+        ConnectionError,
+        TimeoutError,
+    ),
+)
+
+HTTP_RETRY_CONFIG = RetryConfig(
+    max_attempts=3,
+    initial_delay_seconds=0.5,
+    max_delay_seconds=15.0,
+    exponential_base=2.0,
+    jitter=True,
+    retry_on_exceptions=(
+        ConnectionError,
+        TimeoutError,
+        ExternalAPIError,
+    ),
 )
 
 
-def _should_retry_exception(exception: Exception) -> bool:
+def is_retryable_status_code(status_code: int) -> bool:
+    """Check if an HTTP status code should trigger a retry."""
+    # 429: Rate limited
+    # 500+: Server errors (except 501 Not Implemented)
+    return status_code == 429 or (status_code >= 500 and status_code != 501)
+
+
+def calculate_backoff(
+    attempt: int,
+    initial_delay: float,
+    exponential_base: float,
+    max_delay: float,
+    jitter: bool = True,
+) -> float:
     """
-    Determina se uma exceção deve triggear retry.
+    Calculate backoff delay with optional jitter.
 
-    Returns:
-        True se deve tentar novamente
+    Uses exponential backoff: delay = initial * (base ** attempt)
+    With jitter: adds random factor to prevent thundering herd
     """
-    # Nunca retry em erros de validação
-    from .errors import ValidationError, AuthenticationError
-    if isinstance(exception, (ValidationError, AuthenticationError)):
-        return False
+    delay = min(initial_delay * (exponential_base ** attempt), max_delay)
 
-    # Retry em rate limit
-    if isinstance(exception, RateLimitError):
-        return True
+    if jitter:
+        # Full jitter: random value between 0 and calculated delay
+        delay = random.uniform(0, delay)
 
-    # Retry em timeout
-    if isinstance(exception, TimeoutError):
-        return True
-
-    # Retry em erros de database temporários
-    if isinstance(exception, DatabaseError):
-        # Não retry em erros de constraint/validação
-        if exception.code in ("DB004", "DB005", "DB006", "DB007"):
-            return False
-        return True
-
-    # Retry em erros de serviço externo
-    if isinstance(exception, ExternalServiceError):
-        # Verifica status code se disponível
-        status_code = exception.details.get('status_code')
-        if status_code in (429, 500, 502, 503, 504):
-            return True
-        return False
-
-    # Erros genéricos - retry em erros de rede
-    error_str = str(exception).lower()
-    network_errors = ['connection', 'timeout', 'network', 'socket', 'reset']
-    return any(err in error_str for err in network_errors)
+    return delay
 
 
-def _get_wait_time(attempt: int, config: RetryConfig) -> float:
-    """
-    Calcula tempo de espera com exponential backoff + jitter.
-
-    Args:
-        attempt: Número da tentativa (1-indexed)
-        config: Configuração de retry
-
-    Returns:
-        Tempo de espera em segundos
-    """
-    # Exponential backoff
-    wait = config.initial_wait_seconds * (config.exponential_base ** (attempt - 1))
-
-    # Cap no máximo
-    wait = min(wait, config.max_wait_seconds)
-
-    # Adiciona jitter (±25%)
-    if config.jitter:
-        jitter = wait * 0.25
-        wait = wait + random.uniform(-jitter, jitter)
-
-    return max(0.1, wait)  # Mínimo 100ms
-
-
-def retry_with_backoff(
-    config: RetryConfig = None,
+def with_retry(
+    config: Optional[RetryConfig] = None,
+    max_attempts: Optional[int] = None,
+    initial_delay: Optional[float] = None,
+    max_delay: Optional[float] = None,
+    retry_on: Optional[Tuple[Type[Exception], ...]] = None,
     on_retry: Optional[Callable] = None,
 ) -> Callable:
     """
-    Decorator genérico para retry com exponential backoff.
+    Decorator to add retry logic to a function.
+
+    Args:
+        config: RetryConfig to use (or individual params below)
+        max_attempts: Maximum retry attempts
+        initial_delay: Initial delay in seconds
+        max_delay: Maximum delay in seconds
+        retry_on: Tuple of exception types to retry on
+        on_retry: Callback function called on each retry
 
     Usage:
-        @retry_with_backoff(config=DATABASE_RETRY_CONFIG)
-        async def fetch_data():
+        @with_retry(config=ANTHROPIC_RETRY_CONFIG)
+        async def call_anthropic(prompt: str):
             ...
 
-        @retry_with_backoff()
-        def sync_operation():
+        @with_retry(max_attempts=3, retry_on=(ConnectionError,))
+        def fetch_data():
             ...
     """
+    # Build config from individual params or use provided config
     if config is None:
-        config = RetryConfig()
+        config = RetryConfig(
+            max_attempts=max_attempts or 3,
+            initial_delay_seconds=initial_delay or 1.0,
+            max_delay_seconds=max_delay or 60.0,
+            retry_on_exceptions=retry_on or (Exception,),
+        )
 
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs) -> T:
-            from .logging import get_logger
-            logger = get_logger(func.__module__)
-
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
             last_exception = None
 
-            for attempt in range(1, config.max_attempts + 1):
+            for attempt in range(config.max_attempts):
                 try:
                     return await func(*args, **kwargs)
-
-                except Exception as e:
+                except config.retry_on_exceptions as e:
                     last_exception = e
 
-                    # Verifica se deve retry
-                    if not _should_retry_exception(e):
+                    if attempt < config.max_attempts - 1:
+                        delay = calculate_backoff(
+                            attempt=attempt,
+                            initial_delay=config.initial_delay_seconds,
+                            exponential_base=config.exponential_base,
+                            max_delay=config.max_delay_seconds,
+                            jitter=config.jitter,
+                        )
+
                         logger.warning(
-                            f"Not retrying {func.__name__}: {type(e).__name__}",
-                            extra={
-                                "function": func.__name__,
-                                "attempt": attempt,
-                                "error_type": type(e).__name__,
-                                "will_retry": False,
-                            }
+                            f"Retry {attempt + 1}/{config.max_attempts} for {func.__name__}",
+                            extra_fields={
+                                "exception": type(e).__name__,
+                                "delay_seconds": round(delay, 2),
+                            },
                         )
-                        raise
 
-                    # Última tentativa - não espera
-                    if attempt >= config.max_attempts:
+                        if on_retry:
+                            on_retry(attempt, e)
+
+                        import asyncio
+                        await asyncio.sleep(delay)
+                    else:
                         logger.error(
-                            f"Max retries ({config.max_attempts}) exceeded for {func.__name__}",
-                            extra={
-                                "function": func.__name__,
-                                "total_attempts": attempt,
-                                "error_type": type(e).__name__,
-                            }
+                            f"All {config.max_attempts} attempts failed for {func.__name__}",
+                            extra_fields={"exception": type(e).__name__},
                         )
-                        raise
+                except Exception as e:
+                    # Non-retryable exception
+                    raise
 
-                    # Calcula tempo de espera
-                    wait_time = _get_wait_time(attempt, config)
+            # All retries exhausted
+            raise last_exception
 
-                    logger.warning(
-                        f"Retry {attempt}/{config.max_attempts} for {func.__name__} "
-                        f"in {wait_time:.2f}s",
-                        extra={
-                            "function": func.__name__,
-                            "attempt": attempt,
-                            "max_attempts": config.max_attempts,
-                            "wait_seconds": wait_time,
-                            "error_type": type(e).__name__,
-                            "error_message": str(e)[:200],
-                        }
-                    )
-
-                    # Callback opcional
-                    if on_retry:
-                        on_retry(attempt, e, wait_time)
-
-                    # Espera antes do próximo retry
-                    import asyncio
-                    await asyncio.sleep(wait_time)
-
-            # Não deveria chegar aqui, mas por segurança
-            if last_exception:
-                raise last_exception
-
-        @functools.wraps(func)
-        def sync_wrapper(*args, **kwargs) -> T:
-            from .logging import get_logger
-            import time
-
-            logger = get_logger(func.__module__)
+        @wraps(func)
+        def sync_wrapper(*args, **kwargs):
             last_exception = None
 
-            for attempt in range(1, config.max_attempts + 1):
+            for attempt in range(config.max_attempts):
                 try:
                     return func(*args, **kwargs)
-
-                except Exception as e:
+                except config.retry_on_exceptions as e:
                     last_exception = e
 
-                    if not _should_retry_exception(e):
+                    if attempt < config.max_attempts - 1:
+                        delay = calculate_backoff(
+                            attempt=attempt,
+                            initial_delay=config.initial_delay_seconds,
+                            exponential_base=config.exponential_base,
+                            max_delay=config.max_delay_seconds,
+                            jitter=config.jitter,
+                        )
+
                         logger.warning(
-                            f"Not retrying {func.__name__}: {type(e).__name__}",
-                            extra={
-                                "function": func.__name__,
-                                "attempt": attempt,
-                                "error_type": type(e).__name__,
-                                "will_retry": False,
-                            }
+                            f"Retry {attempt + 1}/{config.max_attempts} for {func.__name__}",
+                            extra_fields={
+                                "exception": type(e).__name__,
+                                "delay_seconds": round(delay, 2),
+                            },
                         )
-                        raise
 
-                    if attempt >= config.max_attempts:
+                        if on_retry:
+                            on_retry(attempt, e)
+
+                        import time
+                        time.sleep(delay)
+                    else:
                         logger.error(
-                            f"Max retries ({config.max_attempts}) exceeded for {func.__name__}",
-                            extra={
-                                "function": func.__name__,
-                                "total_attempts": attempt,
-                                "error_type": type(e).__name__,
-                            }
+                            f"All {config.max_attempts} attempts failed for {func.__name__}",
+                            extra_fields={"exception": type(e).__name__},
                         )
-                        raise
+                except Exception as e:
+                    # Non-retryable exception
+                    raise
 
-                    wait_time = _get_wait_time(attempt, config)
+            # All retries exhausted
+            raise last_exception
 
-                    logger.warning(
-                        f"Retry {attempt}/{config.max_attempts} for {func.__name__} "
-                        f"in {wait_time:.2f}s",
-                        extra={
-                            "function": func.__name__,
-                            "attempt": attempt,
-                            "max_attempts": config.max_attempts,
-                            "wait_seconds": wait_time,
-                            "error_type": type(e).__name__,
-                            "error_message": str(e)[:200],
-                        }
-                    )
-
-                    if on_retry:
-                        on_retry(attempt, e, wait_time)
-
-                    time.sleep(wait_time)
-
-            if last_exception:
-                raise last_exception
-
-        # Detectar se é async ou sync
         import asyncio
         if asyncio.iscoroutinefunction(func):
             return async_wrapper
@@ -306,91 +261,104 @@ def retry_with_backoff(
     return decorator
 
 
-# Decorators de conveniência
-def retry_database(func: Callable[..., T]) -> Callable[..., T]:
+def retry_anthropic(func: Callable) -> Callable:
     """
-    Retry otimizado para operações de banco de dados.
-
-    Usage:
-        @retry_database
-        def query_users():
-            ...
-    """
-    return retry_with_backoff(config=DATABASE_RETRY_CONFIG)(func)
-
-
-def retry_external_api(func: Callable[..., T]) -> Callable[..., T]:
-    """
-    Retry otimizado para APIs externas.
-
-    Usage:
-        @retry_external_api
-        async def call_anthropic():
-            ...
-    """
-    return retry_with_backoff(config=EXTERNAL_API_RETRY_CONFIG)(func)
-
-
-def retry_anthropic(func: Callable[..., T]) -> Callable[..., T]:
-    """
-    Retry otimizado para Anthropic API.
+    Shorthand decorator for Anthropic API calls.
 
     Usage:
         @retry_anthropic
-        async def generate_response():
-            ...
+        async def evaluate_with_claude(prompt: str):
+            return await client.messages.create(...)
     """
-    return retry_with_backoff(config=ANTHROPIC_RETRY_CONFIG)(func)
+    return with_retry(config=ANTHROPIC_RETRY_CONFIG)(func)
 
 
-# =============================================================================
-# Utility para retry manual
-# =============================================================================
-
-async def execute_with_retry(
-    operation: Callable[..., T],
-    *args,
-    config: RetryConfig = None,
-    operation_name: str = "operation",
-    **kwargs
-) -> T:
+def retry_supabase(func: Callable) -> Callable:
     """
-    Executa uma operação com retry.
-    Útil quando não se pode usar decorator.
+    Shorthand decorator for Supabase calls.
 
     Usage:
-        result = await execute_with_retry(
-            client.fetch_data,
-            user_id,
-            config=DATABASE_RETRY_CONFIG,
-            operation_name="fetch_user"
+        @retry_supabase
+        def get_agent(agent_id: str):
+            return client.table('agents').select('*').eq('id', agent_id).execute()
+    """
+    return with_retry(config=SUPABASE_RETRY_CONFIG)(func)
+
+
+def retry_http(func: Callable) -> Callable:
+    """
+    Shorthand decorator for HTTP calls.
+
+    Usage:
+        @retry_http
+        async def fetch_external_api(url: str):
+            return await httpx.get(url)
+    """
+    return with_retry(config=HTTP_RETRY_CONFIG)(func)
+
+
+class RetryContext:
+    """
+    Context manager for manual retry control.
+
+    Usage:
+        async with RetryContext(max_attempts=3) as ctx:
+            while ctx.should_retry:
+                try:
+                    result = await some_operation()
+                    break
+                except RetryableError as e:
+                    await ctx.handle_retry(e)
+    """
+
+    def __init__(
+        self,
+        max_attempts: int = 3,
+        initial_delay: float = 1.0,
+        max_delay: float = 60.0,
+        jitter: bool = True,
+    ):
+        self.max_attempts = max_attempts
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.jitter = jitter
+        self.attempt = 0
+        self.last_exception: Optional[Exception] = None
+
+    async def __aenter__(self) -> "RetryContext":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    @property
+    def should_retry(self) -> bool:
+        """Check if more retry attempts are available."""
+        return self.attempt < self.max_attempts
+
+    async def handle_retry(self, exception: Exception) -> None:
+        """Handle a retry attempt."""
+        self.last_exception = exception
+        self.attempt += 1
+
+        if self.attempt >= self.max_attempts:
+            raise exception
+
+        delay = calculate_backoff(
+            attempt=self.attempt - 1,
+            initial_delay=self.initial_delay,
+            exponential_base=2.0,
+            max_delay=self.max_delay,
+            jitter=self.jitter,
         )
-    """
-    if config is None:
-        config = RetryConfig()
 
-    @retry_with_backoff(config=config)
-    async def _execute():
-        return await operation(*args, **kwargs)
+        logger.warning(
+            f"Retry attempt {self.attempt}/{self.max_attempts}",
+            extra_fields={
+                "exception": type(exception).__name__,
+                "delay_seconds": round(delay, 2),
+            },
+        )
 
-    return await _execute()
-
-
-def execute_with_retry_sync(
-    operation: Callable[..., T],
-    *args,
-    config: RetryConfig = None,
-    operation_name: str = "operation",
-    **kwargs
-) -> T:
-    """
-    Versão síncrona de execute_with_retry.
-    """
-    if config is None:
-        config = RetryConfig()
-
-    @retry_with_backoff(config=config)
-    def _execute():
-        return operation(*args, **kwargs)
-
-    return _execute()
+        import asyncio
+        await asyncio.sleep(delay)

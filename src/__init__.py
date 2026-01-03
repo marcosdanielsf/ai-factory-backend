@@ -3,12 +3,20 @@ AI Factory Testing Framework
 ============================
 
 Framework para testar e avaliar agentes de IA usando LLM-as-Judge.
+Inclui retry logic, logging estruturado e error handling robusto.
 
 Components:
-- SupabaseClient: Cliente para interacao com banco de dados
-- Evaluator: Avalia agentes usando Claude Opus como juiz
+- SupabaseClient: Cliente para interacao com banco de dados (com retry)
+- Evaluator: Avalia agentes usando Claude Opus como juiz (com retry)
 - ReportGenerator: Gera relatorios HTML
 - TestRunner: Orquestra todo o processo de testes
+
+Core:
+- exceptions: Custom exception hierarchy
+- logging_config: Structured logging with correlation IDs
+- retry: Retry decorators for external APIs
+- middleware: FastAPI middleware for request tracking
+- responses: Standardized API response models
 
 Usage:
     from src import TestRunner, Evaluator, ReportGenerator, SupabaseClient
@@ -34,11 +42,39 @@ from .evaluator import Evaluator
 from .report_generator import ReportGenerator
 from .test_runner import TestRunner, run_quick_test
 
-__version__ = "1.0.0"
+# Core modules
+from .core.exceptions import (
+    AIFactoryError,
+    DatabaseError,
+    ExternalAPIError,
+    AnthropicAPIError,
+    ValidationError,
+    NotFoundError,
+)
+from .core.logging_config import setup_logging, get_logger, LogContext
+from .core.retry import with_retry, ANTHROPIC_RETRY_CONFIG, SUPABASE_RETRY_CONFIG
+
+__version__ = "1.1.0"
 __all__ = [
+    # Main components
     "SupabaseClient",
     "Evaluator",
     "ReportGenerator",
     "TestRunner",
-    "run_quick_test"
+    "run_quick_test",
+    # Core - Exceptions
+    "AIFactoryError",
+    "DatabaseError",
+    "ExternalAPIError",
+    "AnthropicAPIError",
+    "ValidationError",
+    "NotFoundError",
+    # Core - Logging
+    "setup_logging",
+    "get_logger",
+    "LogContext",
+    # Core - Retry
+    "with_retry",
+    "ANTHROPIC_RETRY_CONFIG",
+    "SUPABASE_RETRY_CONFIG",
 ]

@@ -1,83 +1,88 @@
 """
-AI Factory Core Infrastructure
-==============================
+Core module for AI Factory Backend.
 
-Módulos de infraestrutura para:
-- Error handling centralizado
-- Retry logic com tenacity
-- Logging estruturado (JSON)
-- Request context/tracing
+Provides centralized error handling, logging, retry logic, and middleware.
 """
 
-from .errors import (
+from .exceptions import (
     AIFactoryError,
     DatabaseError,
-    ExternalServiceError,
+    DatabaseConnectionError,
+    DatabaseQueryError,
+    ExternalAPIError,
+    AnthropicAPIError,
+    AnthropicRateLimitError,
     ValidationError,
     AuthenticationError,
+    InvalidAPIKeyError,
     RateLimitError,
     TimeoutError,
-    error_handler,
-    handle_supabase_error,
-    handle_anthropic_error,
+    NotFoundError,
+    ErrorCode,
 )
-
+from .logging_config import setup_logging, get_logger, LogContext, Timer
 from .retry import (
-    retry_with_backoff,
-    retry_database,
-    retry_external_api,
+    with_retry,
     RetryConfig,
+    ANTHROPIC_RETRY_CONFIG,
+    SUPABASE_RETRY_CONFIG,
+    HTTP_RETRY_CONFIG,
+    retry_anthropic,
+    retry_supabase,
+    retry_http,
 )
-
-from .logging import (
-    get_logger,
-    setup_logging,
-    LogContext,
-    log_operation,
-    log_request,
-    log_response,
-)
-
-from .context import (
-    RequestContext,
-    RequestContextManager,
-    get_request_id,
-    set_request_context,
-    get_request_context,
-    extract_context_from_request,
-    add_context_to_response,
+from .responses import (
+    SuccessResponse,
+    ErrorResponse,
+    PaginatedResponse,
+    HealthResponse,
+    BatchJobResponse,
+    success,
+    error,
+    health,
+    batch_job,
+    paginated,
 )
 
 __all__ = [
-    # Errors
+    # Exceptions
     "AIFactoryError",
     "DatabaseError",
-    "ExternalServiceError",
+    "DatabaseConnectionError",
+    "DatabaseQueryError",
+    "ExternalAPIError",
+    "AnthropicAPIError",
+    "AnthropicRateLimitError",
     "ValidationError",
     "AuthenticationError",
+    "InvalidAPIKeyError",
     "RateLimitError",
     "TimeoutError",
-    "error_handler",
-    "handle_supabase_error",
-    "handle_anthropic_error",
-    # Retry
-    "retry_with_backoff",
-    "retry_database",
-    "retry_external_api",
-    "RetryConfig",
+    "NotFoundError",
+    "ErrorCode",
     # Logging
-    "get_logger",
     "setup_logging",
+    "get_logger",
     "LogContext",
-    "log_operation",
-    "log_request",
-    "log_response",
-    # Context
-    "RequestContext",
-    "RequestContextManager",
-    "get_request_id",
-    "set_request_context",
-    "get_request_context",
-    "extract_context_from_request",
-    "add_context_to_response",
+    "Timer",
+    # Retry
+    "with_retry",
+    "RetryConfig",
+    "ANTHROPIC_RETRY_CONFIG",
+    "SUPABASE_RETRY_CONFIG",
+    "HTTP_RETRY_CONFIG",
+    "retry_anthropic",
+    "retry_supabase",
+    "retry_http",
+    # Responses
+    "SuccessResponse",
+    "ErrorResponse",
+    "PaginatedResponse",
+    "HealthResponse",
+    "BatchJobResponse",
+    "success",
+    "error",
+    "health",
+    "batch_job",
+    "paginated",
 ]

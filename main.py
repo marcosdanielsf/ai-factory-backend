@@ -2,92 +2,165 @@
 AI Factory Backend API - FastAPI Application
 ============================================
 High-performance API for AI testing framework deployed on Railway.
+With structured logging, retry logic, and robust error handling.
 """
 
 import os
-import json
-import logging
 import time
-from datetime import datetime
-from typing import Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, status
+from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZIPMiddleware
-from fastapi.responses import JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
+# Core modules
+from src.core.logging_config import setup_logging, get_logger, LogContext, Timer
+from src.core.middleware import setup_middleware, OperationContext
+from src.core.exceptions import (
+    AIFactoryError,
+    DatabaseError,
+    NotFoundError,
+    ValidationError,
+)
+from src.core.responses import (
+    success,
+    error,
+    health,
+    batch_job,
+    SuccessResponse,
+    ErrorResponse,
+    HealthResponse,
+    BatchJobResponse,
+)
+
+# Application modules
 from src.supabase_client import SupabaseClient
 from src.test_runner import TestRunner
 from src.evaluator import Evaluator
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Configure structured logging
+IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
+setup_logging(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    json_logs=IS_PRODUCTION,
 )
-logger = logging.getLogger(__name__)
+
+logger = get_logger(__name__)
 
 
-# Global instances
-supabase_client: Optional[SupabaseClient] = None
-test_runner: Optional[TestRunner] = None
+# =============================================================================
+# Application State
+# =============================================================================
 
+class AppState:
+    """Application state container."""
+
+    def __init__(self):
+        self.supabase_client: Optional[SupabaseClient] = None
+        self.test_runner: Optional[TestRunner] = None
+        self.startup_time: Optional[datetime] = None
+        self.version: str = "1.1.0"
+
+    @property
+    def is_ready(self) -> bool:
+        """Check if all services are initialized."""
+        return self.supabase_client is not None and self.test_runner is not None
+
+
+app_state = AppState()
+
+
+# =============================================================================
+# Application Lifecycle
+# =============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown."""
-    global supabase_client, test_runner
-
-    # Startup
     logger.info("Starting AI Factory API...")
+
     try:
-        supabase_client = SupabaseClient()
-        test_runner = TestRunner()
-        logger.info("Supabase client initialized")
-        logger.info("Test runner initialized")
+        # Initialize Supabase client
+        with Timer() as timer:
+            app_state.supabase_client = SupabaseClient()
+        logger.info(
+            "Supabase client initialized",
+            extra_fields={"duration_ms": timer.duration_ms},
+        )
+
+        # Initialize Test Runner
+        with Timer() as timer:
+            app_state.test_runner = TestRunner()
+        logger.info(
+            "Test runner initialized",
+            extra_fields={"duration_ms": timer.duration_ms},
+        )
+
+        app_state.startup_time = datetime.now(timezone.utc)
+        logger.info(
+            "AI Factory API started successfully",
+            extra_fields={"version": app_state.version},
+        )
+
+    except DatabaseError as e:
+        logger.error(
+            "Failed to initialize database connection",
+            extra_fields={"error_code": e.error_code.value, "error": str(e)},
+        )
+        raise
     except Exception as e:
-        logger.error(f"Failed to initialize clients: {e}")
+        logger.error(
+            "Failed to initialize application",
+            extra_fields={"error_type": type(e).__name__, "error": str(e)},
+        )
         raise
 
     yield
 
     # Shutdown
     logger.info("Shutting down AI Factory API...")
+    app_state.supabase_client = None
+    app_state.test_runner = None
 
 
-# Initialize FastAPI app
+# =============================================================================
+# FastAPI Application
+# =============================================================================
+
 app = FastAPI(
     title="AI Factory API",
     description="High-performance testing framework for AI agents",
-    version="1.0.0",
-    lifespan=lifespan
+    version=app_state.version,
+    lifespan=lifespan,
 )
 
+# Setup custom middleware (request ID, logging, error handlers)
+setup_middleware(
+    app,
+    include_error_details=not IS_PRODUCTION,
+    enable_request_logging=True,
+)
 
-# Middleware for CORS
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Middleware for Gzip compression
-app.add_middleware(GZIPMiddleware, minimum_size=1000)
+# Gzip compression
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-# Pydantic models
-class HealthCheckResponse(BaseModel):
-    """Health check response."""
-    status: str
-    timestamp: datetime
-    version: str
-    database: str
-
+# =============================================================================
+# Pydantic Models
+# =============================================================================
 
 class TestCaseInput(BaseModel):
     """Test case input model."""
@@ -106,7 +179,7 @@ class TestResult(BaseModel):
     status: str
     score: float
     feedback: str
-    execution_time: float
+    execution_time_ms: float
     timestamp: datetime
 
 
@@ -117,171 +190,182 @@ class BatchTestInput(BaseModel):
     run_name: Optional[str] = None
 
 
-# API Routes
+# =============================================================================
+# Health Endpoints
+# =============================================================================
 
-@app.get("/health", response_model=HealthCheckResponse, tags=["Health"])
-async def health_check():
+@app.get("/health", tags=["Health"])
+async def health_check(request: Request):
     """
-    Health check endpoint.
+    Health check endpoint with detailed service status.
 
     Returns:
-        HealthCheckResponse with status and version info
+        Health status with database connectivity info
     """
-    try:
-        # Test Supabase connection
-        if supabase_client:
-            supabase_client.ping()
-            db_status = "connected"
-        else:
-            db_status = "not_initialized"
+    request_id = getattr(request.state, "request_id", None)
 
-        return HealthCheckResponse(
-            status="healthy",
-            timestamp=datetime.utcnow(),
-            version="1.0.0",
-            database=db_status
-        )
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Service unavailable"
-        )
+    checks = {}
+
+    # Check Supabase
+    if app_state.supabase_client:
+        db_health = app_state.supabase_client.health_check()
+        checks["database"] = db_health
+    else:
+        checks["database"] = {"status": "not_initialized", "connected": False}
+
+    # Check Test Runner
+    checks["test_runner"] = {
+        "status": "ready" if app_state.test_runner else "not_initialized",
+        "initialized": app_state.test_runner is not None,
+    }
+
+    # Determine overall status
+    all_healthy = all(
+        check.get("status") in ("healthy", "ready")
+        for check in checks.values()
+    )
+
+    return health(
+        status="healthy" if all_healthy else "degraded",
+        version=app_state.version,
+        checks=checks,
+        request_id=request_id,
+    )
 
 
 @app.get("/ping", tags=["Health"])
 async def ping():
     """Simple ping endpoint for load balancers."""
-    return {"message": "pong", "timestamp": datetime.utcnow().isoformat()}
+    return {"message": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
-@app.post("/api/v1/test/run", response_model=TestResult, tags=["Testing"])
+# =============================================================================
+# Testing Endpoints
+# =============================================================================
+
+@app.post("/api/v1/test/run", tags=["Testing"])
 async def run_test(
     test_input: TestCaseInput,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    request: Request,
 ):
     """
     Run a single test case against an agent.
 
     Args:
         test_input: Test case configuration
-        background_tasks: Background task runner
 
     Returns:
-        TestResult with score and feedback
+        Test result with score and feedback
     """
-    if not test_runner:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Test runner not initialized"
+    request_id = getattr(request.state, "request_id", None)
+
+    if not app_state.is_ready:
+        raise AIFactoryError(
+            message="Service not ready",
+            status_code=503,
         )
 
-    try:
-        start_time = time.time()
-
-        # Run test
-        result = test_runner.run_single_test(
-            agent_id=test_input.agent_id,
-            test_case={
-                'name': test_input.test_name,
-                'input': test_input.input_text,
-                'expected_behavior': test_input.expected_behavior,
-                'rubric_focus': test_input.rubric_focus
-            }
-        )
-
-        execution_time = time.time() - start_time
-
-        # Save result to Supabase
-        if supabase_client:
-            background_tasks.add_task(
-                supabase_client.save_test_result,
+    async with OperationContext(
+        "run_single_test",
+        agent_id=test_input.agent_id,
+        test_name=test_input.test_name,
+    ) as ctx:
+        with Timer() as timer:
+            # Run test
+            result = app_state.test_runner.run_single_test(
                 agent_id=test_input.agent_id,
-                result=result,
-                execution_time=execution_time
+                test_case={
+                    'name': test_input.test_name,
+                    'input': test_input.input_text,
+                    'expected_behavior': test_input.expected_behavior,
+                    'rubric_focus': test_input.rubric_focus
+                }
             )
 
-        return TestResult(
-            test_id=result.get('test_id', 'unknown'),
-            agent_id=test_input.agent_id,
-            test_name=test_input.test_name,
-            status="completed",
-            score=result.get('score', 0.0),
-            feedback=result.get('feedback', ''),
-            execution_time=execution_time,
-            timestamp=datetime.utcnow()
-        )
+        ctx.add_metric("score", result.get('score', 0.0))
+        ctx.add_metric("execution_ms", timer.duration_ms)
 
-    except Exception as e:
-        logger.error(f"Test execution failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Test execution failed: {str(e)}"
+        # Save result to Supabase in background
+        if app_state.supabase_client:
+            background_tasks.add_task(
+                app_state.supabase_client.save_test_result,
+                agent_version_id=test_input.agent_id,
+                overall_score=result.get('score', 0.0),
+                test_details=result,
+                report_url="",
+                test_duration_ms=int(timer.duration_ms),
+            )
+
+        return success(
+            data=TestResult(
+                test_id=result.get('test_id', f"test_{int(time.time() * 1000)}"),
+                agent_id=test_input.agent_id,
+                test_name=test_input.test_name,
+                status="completed",
+                score=result.get('score', 0.0),
+                feedback=result.get('feedback', ''),
+                execution_time_ms=timer.duration_ms,
+                timestamp=datetime.now(timezone.utc),
+            ).model_dump(),
+            message="Test completed successfully",
+            request_id=request_id,
         )
 
 
 @app.post("/api/v1/test/batch", tags=["Testing"])
 async def run_batch_tests(
     batch_input: BatchTestInput,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    request: Request,
 ):
     """
     Run multiple test cases in batch.
 
     Args:
         batch_input: Batch test configuration
-        background_tasks: Background task runner
 
     Returns:
         Batch job info with status endpoint
     """
-    if not test_runner:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Test runner not initialized"
+    request_id = getattr(request.state, "request_id", None)
+
+    if not app_state.is_ready:
+        raise AIFactoryError(
+            message="Service not ready",
+            status_code=503,
         )
 
-    try:
-        run_id = f"batch_{int(time.time() * 1000)}"
+    run_id = f"batch_{int(time.time() * 1000)}"
 
-        # Store batch info in Supabase
-        if supabase_client:
-            background_tasks.add_task(
-                supabase_client.save_batch_job,
-                run_id=run_id,
-                agent_id=batch_input.agent_id,
-                test_count=len(batch_input.test_cases),
-                status="processing"
-            )
-
-        # Run tests asynchronously
-        background_tasks.add_task(
-            _execute_batch,
-            run_id=run_id,
-            agent_id=batch_input.agent_id,
-            test_cases=batch_input.test_cases,
-            run_name=batch_input.run_name
-        )
-
-        return {
+    logger.info(
+        "Batch test submitted",
+        extra_fields={
             "run_id": run_id,
             "agent_id": batch_input.agent_id,
             "test_count": len(batch_input.test_cases),
-            "status": "queued",
-            "status_endpoint": f"/api/v1/test/status/{run_id}",
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        },
+    )
 
-    except Exception as e:
-        logger.error(f"Batch test submission failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Batch test submission failed: {str(e)}"
-        )
+    # Run tests asynchronously
+    background_tasks.add_task(
+        _execute_batch,
+        run_id=run_id,
+        agent_id=batch_input.agent_id,
+        test_cases=batch_input.test_cases,
+        run_name=batch_input.run_name,
+    )
+
+    return batch_job(
+        job_id=run_id,
+        status_endpoint=f"/api/v1/test/status/{run_id}",
+        estimated_duration=len(batch_input.test_cases) * 5,
+        request_id=request_id,
+    )
 
 
 @app.get("/api/v1/test/status/{run_id}", tags=["Testing"])
-async def get_test_status(run_id: str):
+async def get_test_status(run_id: str, request: Request):
     """
     Get status of a batch test run.
 
@@ -291,28 +375,36 @@ async def get_test_status(run_id: str):
     Returns:
         Status information and results
     """
-    if not supabase_client:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not available"
+    request_id = getattr(request.state, "request_id", None)
+
+    if not app_state.supabase_client:
+        raise AIFactoryError(
+            message="Database not available",
+            status_code=503,
         )
 
-    try:
-        status_info = supabase_client.get_batch_status(run_id)
-        return status_info
-    except Exception as e:
-        logger.error(f"Failed to retrieve status: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve status: {str(e)}"
-        )
+    # Note: You'll need to implement get_batch_status in supabase_client
+    # For now, return a placeholder
+    return success(
+        data={
+            "run_id": run_id,
+            "status": "processing",
+            "message": "Batch status endpoint - implement get_batch_status method",
+        },
+        request_id=request_id,
+    )
 
+
+# =============================================================================
+# Agent Endpoints
+# =============================================================================
 
 @app.get("/api/v1/agents/{agent_id}/results", tags=["Agents"])
 async def get_agent_results(
     agent_id: str,
     limit: int = 10,
-    offset: int = 0
+    offset: int = 0,
+    request: Request = None,
 ):
     """
     Get test results for an agent.
@@ -325,131 +417,157 @@ async def get_agent_results(
     Returns:
         List of test results
     """
-    if not supabase_client:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not available"
+    request_id = getattr(request.state, "request_id", None) if request else None
+
+    if not app_state.supabase_client:
+        raise AIFactoryError(
+            message="Database not available",
+            status_code=503,
         )
 
-    try:
-        results = supabase_client.get_agent_results(
-            agent_id=agent_id,
+    with LogContext(operation="get_agent_results", agent_id=agent_id):
+        results = app_state.supabase_client.get_test_results_history(
+            agent_version_id=agent_id,
             limit=limit,
-            offset=offset
         )
-        return {
-            "agent_id": agent_id,
-            "count": len(results),
-            "results": results
-        }
-    except Exception as e:
-        logger.error(f"Failed to retrieve results: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve results: {str(e)}"
+
+        return success(
+            data={
+                "agent_id": agent_id,
+                "count": len(results),
+                "results": results,
+            },
+            request_id=request_id,
         )
 
 
 @app.get("/api/v1/metrics", tags=["Metrics"])
-async def get_metrics():
+async def get_metrics(request: Request):
     """
     Get system metrics and performance stats.
 
     Returns:
         Performance and usage metrics
     """
-    if not supabase_client:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not available"
-        )
+    request_id = getattr(request.state, "request_id", None)
 
-    try:
-        metrics = supabase_client.get_metrics()
-        return {
-            "timestamp": datetime.utcnow().isoformat(),
-            "metrics": metrics
-        }
-    except Exception as e:
-        logger.error(f"Failed to retrieve metrics: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve metrics: {str(e)}"
-        )
+    uptime_seconds = None
+    if app_state.startup_time:
+        uptime_seconds = (datetime.now(timezone.utc) - app_state.startup_time).total_seconds()
+
+    return success(
+        data={
+            "version": app_state.version,
+            "uptime_seconds": uptime_seconds,
+            "services": {
+                "database": "connected" if app_state.supabase_client else "disconnected",
+                "test_runner": "ready" if app_state.test_runner else "not_initialized",
+            },
+        },
+        request_id=request_id,
+    )
 
 
-# Background task helper
+# =============================================================================
+# Background Tasks
+# =============================================================================
+
 async def _execute_batch(
     run_id: str,
     agent_id: str,
     test_cases: list,
-    run_name: Optional[str]
+    run_name: Optional[str],
 ):
-    """Execute batch tests in background."""
-    try:
-        logger.info(f"Starting batch execution: {run_id}")
-
-        results = []
-        for i, test_case in enumerate(test_cases):
-            try:
-                result = test_runner.run_single_test(
-                    agent_id=agent_id,
-                    test_case={
-                        'name': test_case.test_name,
-                        'input': test_case.input_text,
-                        'expected_behavior': test_case.expected_behavior,
-                        'rubric_focus': test_case.rubric_focus
-                    }
-                )
-                results.append(result)
-            except Exception as e:
-                logger.error(f"Test {i} failed: {e}")
-                results.append({'test_id': f"test_{i}", 'error': str(e)})
-
-        # Update batch status
-        if supabase_client:
-            supabase_client.save_batch_results(
-                run_id=run_id,
-                results=results,
-                status="completed"
+    """Execute batch tests in background with proper error handling."""
+    with LogContext(operation="execute_batch", run_id=run_id, agent_id=agent_id):
+        with Timer() as batch_timer:
+            logger.info(
+                "Starting batch execution",
+                extra_fields={
+                    "run_id": run_id,
+                    "test_count": len(test_cases),
+                },
             )
 
-        logger.info(f"Batch execution completed: {run_id}")
+            results = []
+            failed_count = 0
 
-    except Exception as e:
-        logger.error(f"Batch execution failed: {e}")
-        if supabase_client:
-            supabase_client.save_batch_results(
-                run_id=run_id,
-                results=[],
-                status="failed",
-                error=str(e)
+            for i, test_case in enumerate(test_cases):
+                try:
+                    with Timer() as test_timer:
+                        result = app_state.test_runner.run_single_test(
+                            agent_id=agent_id,
+                            test_case={
+                                'name': test_case.test_name,
+                                'input': test_case.input_text,
+                                'expected_behavior': test_case.expected_behavior,
+                                'rubric_focus': test_case.rubric_focus
+                            }
+                        )
+                        result['execution_time_ms'] = test_timer.duration_ms
+                        results.append(result)
+
+                    logger.debug(
+                        f"Test {i+1}/{len(test_cases)} completed",
+                        extra_fields={
+                            "test_name": test_case.test_name,
+                            "score": result.get('score', 0),
+                            "duration_ms": test_timer.duration_ms,
+                        },
+                    )
+
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(
+                        f"Test {i+1}/{len(test_cases)} failed",
+                        extra_fields={
+                            "test_name": test_case.test_name,
+                            "error": str(e),
+                        },
+                    )
+                    results.append({
+                        'test_id': f"test_{i}",
+                        'test_name': test_case.test_name,
+                        'status': 'failed',
+                        'error': str(e),
+                    })
+
+            # Calculate summary
+            completed_count = len(test_cases) - failed_count
+            avg_score = 0.0
+            if completed_count > 0:
+                scores = [r.get('score', 0) for r in results if 'score' in r]
+                avg_score = sum(scores) / len(scores) if scores else 0.0
+
+            logger.info(
+                "Batch execution completed",
+                extra_fields={
+                    "run_id": run_id,
+                    "total_tests": len(test_cases),
+                    "completed": completed_count,
+                    "failed": failed_count,
+                    "avg_score": round(avg_score, 2),
+                    "duration_ms": batch_timer.duration_ms,
+                },
             )
 
 
-# Error handlers
-@app.exception_handler(Exception)
-async def general_exception_handler(request, exc):
-    """Handle all exceptions."""
-    logger.error(f"Unhandled exception: {exc}")
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal server error"}
-    )
-
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
 if __name__ == "__main__":
-    # Get configuration from environment
     host = os.getenv("SERVER_HOST", "0.0.0.0")
     port = int(os.getenv("SERVER_PORT", 8000))
-    workers = int(os.getenv("GUNICORN_WORKERS", 4))
 
-    logger.info(f"Starting server on {host}:{port} with {workers} workers")
+    logger.info(
+        "Starting server",
+        extra_fields={"host": host, "port": port},
+    )
 
     uvicorn.run(
         app,
         host=host,
         port=port,
-        workers=workers,
-        log_level="info"
+        log_level="info",
     )
