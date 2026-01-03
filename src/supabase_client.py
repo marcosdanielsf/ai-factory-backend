@@ -15,17 +15,25 @@ logger = logging.getLogger(__name__)
 
 class SupabaseClient:
     """Cliente Supabase com métodos específicos para o testing framework"""
-    
+
     def __init__(self, url: str = None, key: str = None):
         self.url = url or os.getenv('SUPABASE_URL')
-        # Try SUPABASE_SERVICE_ROLE_KEY first (Railway), fallback to SUPABASE_KEY (legacy)
-        self.key = key or os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_KEY')
+        self.key = key or os.getenv('SUPABASE_KEY')
 
         if not self.url or not self.key:
-            raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) must be set")
-        
+            raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+
         self.client: Client = create_client(self.url, self.key)
         logger.info(f"Supabase client initialized: {self.url}")
+
+    def ping(self) -> bool:
+        """Verifica conexão com Supabase"""
+        try:
+            self.client.table('agent_versions').select('id').limit(1).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Supabase ping failed: {e}")
+            return False
     
     # ============================================
     # AGENT VERSIONS
@@ -110,8 +118,8 @@ class SupabaseClient:
             raise
     
     def get_test_results_history(
-        self, 
-        agent_version_id: str, 
+        self,
+        agent_version_id: str,
         limit: int = 20
     ) -> List[Dict]:
         """Busca histórico de testes de um agente"""
@@ -125,6 +133,25 @@ class SupabaseClient:
             return response.data
         except Exception as e:
             logger.error(f"Error fetching test history: {e}")
+            return []
+
+    def get_test_results_history_paginated(
+        self,
+        agent_version_id: str,
+        limit: int = 20,
+        offset: int = 0
+    ) -> List[Dict]:
+        """Busca histórico de testes com paginação"""
+        try:
+            response = self.client.table('agenttest_test_results')\
+                .select('*')\
+                .eq('agent_version_id', agent_version_id)\
+                .order('created_at', desc=True)\
+                .range(offset, offset + limit - 1)\
+                .execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Error fetching paginated test history: {e}")
             return []
     
     # ============================================

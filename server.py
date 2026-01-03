@@ -3,21 +3,25 @@
 AI Factory Testing Framework - FastAPI Server
 ==============================================
 REST API para gerenciar testes de agentes IA.
-
-Railway Deploy: v2.0 - Fixed Supabase + httpx dependencies
 """
 
 import os
 import logging
 import asyncio
+import time
+import platform
+import psutil
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Header, BackgroundTasks, status
+from fastapi import FastAPI, HTTPException, Header, BackgroundTasks, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import yaml
 from dotenv import load_dotenv
 
@@ -30,6 +34,12 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Rate Limiter - usa IP do cliente como identificador
+limiter = Limiter(key_func=get_remote_address)
+
+# Métricas globais de uptime
+START_TIME = datetime.utcnow()
 
 config_path = Path(__file__).parent / 'config.yaml'
 try:
@@ -51,6 +61,10 @@ except Exception as e:
     supabase = evaluator = report_generator = None
 
 app = FastAPI(title="AI Factory Testing Framework API", description="REST API para testes automatizados de agentes IA", version="1.0.0")
+
+# Adiciona Rate Limiter ao app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -118,6 +132,28 @@ class HealthResponse(BaseModel):
     timestamp: str
     version: str
     supabase_connected: bool
+    uptime_seconds: float
+    environment: str
+    memory_usage_mb: Optional[float] = None
+    cpu_percent: Optional[float] = None
+
+class HealthDetailedResponse(HealthResponse):
+    python_version: str
+    platform: str
+    host: Optional[str] = None
+    dependencies: Dict[str, str] = {}
+
+class PaginationMeta(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
+
+class PaginatedTestResults(BaseModel):
+    data: List[TestResultDetail]
+    meta: PaginationMeta
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)):
     if not x_api_key:
@@ -135,44 +171,106 @@ async def run_agent_test_background(agent_id: str):
     except Exception as e:
         logger.error(f"Error running test for agent {agent_id}: {e}", exc_info=True)
 
+def get_system_metrics():
+    """Coleta métricas do sistema"""
+    try:
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        cpu_percent = process.cpu_percent(interval=0.1)
+        return memory_mb, cpu_percent
+    except Exception:
+        return None, None
+
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health_check():
+@limiter.limit("60/minute")
+async def health_check(request: Request):
+    """Health check básico - não requer autenticação"""
     supabase_ok = False
-    error_msg = None
     try:
         if supabase:
             test_query = supabase.client.table('agent_versions').select('id').limit(1).execute()
             supabase_ok = True
     except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Supabase health check failed: {e}", exc_info=True)
-    return HealthResponse(status="healthy" if supabase_ok else "degraded", timestamp=datetime.utcnow().isoformat(), version="1.0.0", supabase_connected=supabase_ok)
+        logger.error(f"Supabase health check failed: {e}")
 
-@app.get("/debug/env", tags=["Health"])
-async def debug_env():
-    """Debug endpoint to check environment variables (temporary)"""
-    return {
-        "SUPABASE_URL": os.getenv('SUPABASE_URL')[:30] + "..." if os.getenv('SUPABASE_URL') else None,
-        "SUPABASE_SERVICE_ROLE_KEY": "SET" if os.getenv('SUPABASE_SERVICE_ROLE_KEY') else "NOT SET",
-        "SUPABASE_KEY": "SET" if os.getenv('SUPABASE_KEY') else "NOT SET",
-        "PORT": os.getenv('PORT'),
-        "supabase_client_initialized": supabase is not None,
-        "error_during_init": str(supabase) if supabase is None else None
+    uptime = (datetime.utcnow() - START_TIME).total_seconds()
+    memory_mb, cpu_percent = get_system_metrics()
+    env = os.getenv('ENVIRONMENT', os.getenv('RAILWAY_ENVIRONMENT', 'development'))
+
+    return HealthResponse(
+        status="healthy" if supabase_ok else "degraded",
+        timestamp=datetime.utcnow().isoformat(),
+        version="1.0.0",
+        supabase_connected=supabase_ok,
+        uptime_seconds=uptime,
+        environment=env,
+        memory_usage_mb=round(memory_mb, 2) if memory_mb else None,
+        cpu_percent=round(cpu_percent, 2) if cpu_percent else None
+    )
+
+@app.get("/health/detailed", response_model=HealthDetailedResponse, tags=["Health"])
+@limiter.limit("10/minute")
+async def health_check_detailed(request: Request, x_api_key: str = Header(..., alias="X-API-Key")):
+    """Health check detalhado - requer autenticação"""
+    await verify_api_key(x_api_key)
+
+    supabase_ok = False
+    try:
+        if supabase:
+            test_query = supabase.client.table('agent_versions').select('id').limit(1).execute()
+            supabase_ok = True
+    except Exception as e:
+        logger.error(f"Supabase health check failed: {e}")
+
+    uptime = (datetime.utcnow() - START_TIME).total_seconds()
+    memory_mb, cpu_percent = get_system_metrics()
+    env = os.getenv('ENVIRONMENT', os.getenv('RAILWAY_ENVIRONMENT', 'development'))
+
+    # Versões das dependências principais
+    import fastapi
+    import anthropic
+    deps = {
+        "fastapi": fastapi.__version__,
+        "anthropic": anthropic.__version__,
+        "python": platform.python_version()
     }
 
+    return HealthDetailedResponse(
+        status="healthy" if supabase_ok else "degraded",
+        timestamp=datetime.utcnow().isoformat(),
+        version="1.0.0",
+        supabase_connected=supabase_ok,
+        uptime_seconds=uptime,
+        environment=env,
+        memory_usage_mb=round(memory_mb, 2) if memory_mb else None,
+        cpu_percent=round(cpu_percent, 2) if cpu_percent else None,
+        python_version=platform.python_version(),
+        platform=platform.platform(),
+        host=os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('HOST', 'localhost')),
+        dependencies=deps
+    )
+
+@app.get("/ping", tags=["Health"])
+@limiter.limit("120/minute")
+async def ping(request: Request):
+    """Ping simples para load balancers - sem autenticação"""
+    return {"pong": True, "timestamp": datetime.utcnow().isoformat()}
+
 @app.post("/api/test-agent", response_model=TestAgentResponse, tags=["Testing"])
-async def test_agent(request: TestAgentRequest, background_tasks: BackgroundTasks, x_api_key: str = Header(..., alias="X-API-Key")):
+@limiter.limit("10/minute")
+async def test_agent(request: Request, body: TestAgentRequest, background_tasks: BackgroundTasks, x_api_key: str = Header(..., alias="X-API-Key")):
     await verify_api_key(x_api_key)
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not initialized")
-    agent = supabase.get_agent_version(request.agent_version_id)
+    agent = supabase.get_agent_version(body.agent_version_id)
     if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent {request.agent_version_id} not found")
-    background_tasks.add_task(run_agent_test_background, request.agent_version_id)
-    return TestAgentResponse(status="queued", agent_id=request.agent_version_id, message=f"Test queued for agent '{agent.get('name')}'")
+        raise HTTPException(status_code=404, detail=f"Agent {body.agent_version_id} not found")
+    background_tasks.add_task(run_agent_test_background, body.agent_version_id)
+    return TestAgentResponse(status="queued", agent_id=body.agent_version_id, message=f"Test queued for agent '{agent.get('name')}'")
 
 @app.get("/api/test-results/{test_id}", response_model=TestResultDetail, tags=["Testing"])
-async def get_test_result(test_id: str, x_api_key: str = Header(..., alias="X-API-Key")):
+@limiter.limit("60/minute")
+async def get_test_result(request: Request, test_id: str, x_api_key: str = Header(..., alias="X-API-Key")):
     await verify_api_key(x_api_key)
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not initialized")
@@ -186,7 +284,8 @@ async def get_test_result(test_id: str, x_api_key: str = Header(..., alias="X-AP
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/agents", response_model=List[AgentSummary], tags=["Agents"])
-async def list_agents(limit: int = 100, status_filter: Optional[str] = None, x_api_key: str = Header(..., alias="X-API-Key")):
+@limiter.limit("30/minute")
+async def list_agents(request: Request, limit: int = 100, status_filter: Optional[str] = None, x_api_key: str = Header(..., alias="X-API-Key")):
     await verify_api_key(x_api_key)
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not initialized")
@@ -202,7 +301,8 @@ async def list_agents(limit: int = 100, status_filter: Optional[str] = None, x_a
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/agent/{agent_id}", response_model=AgentDetail, tags=["Agents"])
-async def get_agent_details(agent_id: str, x_api_key: str = Header(..., alias="X-API-Key")):
+@limiter.limit("60/minute")
+async def get_agent_details(request: Request, agent_id: str, x_api_key: str = Header(..., alias="X-API-Key")):
     await verify_api_key(x_api_key)
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not initialized")
@@ -215,19 +315,63 @@ async def get_agent_details(agent_id: str, x_api_key: str = Header(..., alias="X
     total_tests = total_tests_response.count or 0
     return AgentDetail(id=agent['id'], name=agent['name'], mode=agent['mode'], version=agent['version'], status=agent['status'], system_prompt=agent.get('system_prompt'), last_test_score=agent.get('last_test_score'), last_test_at=agent.get('last_test_at'), test_report_url=agent.get('test_report_url'), framework_approved=agent.get('framework_approved'), total_tests=total_tests, latest_test=latest_test)
 
-@app.get("/api/agent/{agent_id}/tests", response_model=List[TestResultDetail], tags=["Agents"])
-async def get_agent_test_history(agent_id: str, limit: int = 20, x_api_key: str = Header(..., alias="X-API-Key")):
+@app.get("/api/agent/{agent_id}/tests", response_model=PaginatedTestResults, tags=["Agents"])
+@limiter.limit("30/minute")
+async def get_agent_test_history(
+    request: Request,
+    agent_id: str,
+    page: int = 1,
+    per_page: int = 20,
+    x_api_key: str = Header(..., alias="X-API-Key")
+):
+    """Retorna histórico de testes com paginação completa"""
     await verify_api_key(x_api_key)
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not initialized")
+
+    # Validação de parâmetros
+    if page < 1:
+        page = 1
+    if per_page < 1:
+        per_page = 20
+    if per_page > 100:
+        per_page = 100  # Limite máximo
+
     agent = supabase.get_agent_version(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
-    tests = supabase.get_test_results_history(agent_id, limit=limit)
-    return [TestResultDetail(**test) for test in tests]
+
+    # Conta total de registros
+    count_response = supabase.client.table('agenttest_test_results')\
+        .select('id', count='exact')\
+        .eq('agent_version_id', agent_id)\
+        .execute()
+    total = count_response.count or 0
+
+    # Calcula offset
+    offset = (page - 1) * per_page
+
+    # Busca resultados paginados
+    tests = supabase.get_test_results_history_paginated(agent_id, limit=per_page, offset=offset)
+
+    # Calcula metadados de paginação
+    total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+
+    return PaginatedTestResults(
+        data=[TestResultDetail(**test) for test in tests],
+        meta=PaginationMeta(
+            total=total,
+            page=page,
+            per_page=per_page,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_prev=page > 1
+        )
+    )
 
 @app.get("/api/agent/{agent_id}/skill", tags=["Skills"])
-async def get_agent_skill(agent_id: str, x_api_key: str = Header(..., alias="X-API-Key")):
+@limiter.limit("60/minute")
+async def get_agent_skill(request: Request, agent_id: str, x_api_key: str = Header(..., alias="X-API-Key")):
     await verify_api_key(x_api_key)
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not initialized")
@@ -240,7 +384,8 @@ async def get_agent_skill(agent_id: str, x_api_key: str = Header(..., alias="X-A
     return skill
 
 @app.post("/api/agent/{agent_id}/skill", response_model=SkillResponse, tags=["Skills"])
-async def create_or_update_skill(agent_id: str, request: SkillRequest, x_api_key: str = Header(..., alias="X-API-Key")):
+@limiter.limit("20/minute")
+async def create_or_update_skill(request: Request, agent_id: str, body: SkillRequest, x_api_key: str = Header(..., alias="X-API-Key")):
     await verify_api_key(x_api_key)
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not initialized")
@@ -248,7 +393,7 @@ async def create_or_update_skill(agent_id: str, request: SkillRequest, x_api_key
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
     try:
-        skill_id = supabase.save_skill(agent_version_id=agent_id, instructions=request.instructions, examples=request.examples, rubric=request.rubric, test_cases=request.test_cases, local_file_path=request.local_file_path)
+        skill_id = supabase.save_skill(agent_version_id=agent_id, instructions=body.instructions, examples=body.examples, rubric=body.rubric, test_cases=body.test_cases, local_file_path=body.local_file_path)
         skill = supabase.get_skill(agent_id)
         return SkillResponse(skill_id=skill_id, version=skill['version'], message=f"Skill v{skill['version']} created successfully")
     except Exception as e:
