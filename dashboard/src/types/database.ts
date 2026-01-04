@@ -107,3 +107,42 @@ export interface AgentNeedingTesting {
   test_reason: 'never_tested' | 'draft_status' | 'updated_since_test' | 'low_score' | 'needs_retest'
   priority: number
 }
+
+// E2E Test Results - Cenários individuais de teste
+export interface E2ETestResult {
+  id: string
+  agent_version_id: string
+  scenario_name: string
+  scenario_description: string | null
+  test_type: string
+  lead_persona: string | null
+  initial_agent: string | null
+  expected_outcome: string | null
+  status: 'passed' | 'failed' | 'timeout' | 'error'
+  actual_outcome: string | null
+  total_turns: number
+  total_tokens: number
+  duration_seconds: number | null
+  score: number | null
+  conversation: any[]
+  modes_tested: string[]
+  mode_transitions: any[]
+  error_message: string | null
+  model_used: string | null
+  tags: string[]
+  created_at: string
+}
+
+// Agrupamento de testes por execução (para o dashboard)
+export interface TestExecution {
+  execution_id: string  // agent_version_id + timestamp agrupado
+  agent_version_id: string
+  agent_name: string
+  version: string
+  tested_at: string
+  overall_score: number
+  total_scenarios: number
+  passed_scenarios: number
+  failed_scenarios: number
+  scenarios: E2ETestResult[]
+}
